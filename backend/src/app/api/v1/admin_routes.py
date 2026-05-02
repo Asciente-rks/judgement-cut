@@ -6,7 +6,7 @@ from ...data.repositories.platforms_repo import set_platform_enabled
 
 router = APIRouter()
 
-
+#lambda trigger
 @router.post("/platforms/{platform_name}/toggle")
 async def toggle_platform(platform_name: str, enabled: bool, user=Depends(get_current_user)):
     if not user.get("is_admin"):
