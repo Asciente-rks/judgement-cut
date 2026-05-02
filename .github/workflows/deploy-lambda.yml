@@ -37,8 +37,8 @@ jobs:
         run: |
           set -e
 
-          # Check if Lambda function exists
-          if aws lambda get-function --function-name "$FUNCTION_NAME" 2>/dev/null; then
+          # Check if Lambda function exists (suppress stdout/stderr to avoid leaking env variables)
+          if aws lambda get-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             echo "Lambda function exists, updating code..."
             aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://backend/function.zip
           else
