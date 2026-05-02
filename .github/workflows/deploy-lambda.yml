@@ -57,3 +57,34 @@ jobs:
               --memory-size 256 >/dev/null 2>&1
             echo "Lambda function created. Please set environment variables in AWS Lambda console."
           fi
+      - name: Create or update Function URL
+        env:
+          FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          FRONTEND_ORIGIN: ${{ secrets.FRONTEND_ORIGIN }}
+        run: |
+          set -e
+
+          FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-https://example.com}"
+
+          # Create or update Function URL, output only the URL (safe to print)
+          if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
+            aws lambda update-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\",\"PUT\",\"DELETE\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --query 'FunctionUrl' --output text
+          else
+            aws lambda create-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\",\"PUT\",\"DELETE\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --query 'FunctionUrl' --output text
+          fi
+
+          # Ensure public invoke permission exists (idempotent)
+          aws lambda add-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id AllowPublicInvoke \
+            --action lambda:InvokeFunctionUrl \
+            --principal '*' \
+            --function-url-auth-type NONE >/dev/null 2>&1 || true
