@@ -1,0 +1,12 @@
+fastapi
+mangum
+httpx[http2]
+uvicorn
+python-dotenv
+sqlalchemy
+databases[mysql]
+aiomysql
+pymysql
+passlib[bcrypt]
+python-jose[cryptography]
+boto3
