@@ -71,13 +71,13 @@ jobs:
             aws lambda update-function-url-config \
               --function-name "$FUNCTION_NAME" \
               --auth-type NONE \
-              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\",\"PUT\",\"DELETE\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
               --query 'FunctionUrl' --output text
           else
             aws lambda create-function-url-config \
               --function-name "$FUNCTION_NAME" \
               --auth-type NONE \
-              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\",\"PUT\",\"DELETE\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
               --query 'FunctionUrl' --output text
           fi
 
