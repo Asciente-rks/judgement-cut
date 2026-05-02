@@ -66,20 +66,32 @@ jobs:
 
           FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-https://example.com}"
 
-          # Create or update Function URL, output only the URL (safe to print)
+          # Create or update Function URL using a temp JSON file to avoid quoting/parsing issues
+          CORS_FILE=$(mktemp)
+          cat > "$CORS_FILE" <<JSON
+{
+  "AllowOrigins": ["$FRONTEND_ORIGIN"],
+  "AllowMethods": ["GET", "POST", "OPTIONS"],
+  "AllowHeaders": ["Content-Type", "Authorization"],
+  "MaxAge": 3600
+}
+JSON
+
           if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             aws lambda update-function-url-config \
               --function-name "$FUNCTION_NAME" \
               --auth-type NONE \
-              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --cors file://"$CORS_FILE" \
               --query 'FunctionUrl' --output text
           else
             aws lambda create-function-url-config \
               --function-name "$FUNCTION_NAME" \
               --auth-type NONE \
-              --cors "{\"AllowOrigins\":[\"$FRONTEND_ORIGIN\"],\"AllowMethods\":[\"GET\",\"POST\",\"OPTIONS\"],\"AllowHeaders\":[\"Content-Type\",\"Authorization\"],\"MaxAge\":3600}" \
+              --cors file://"$CORS_FILE" \
               --query 'FunctionUrl' --output text
           fi
+
+          rm -f "$CORS_FILE"
 
           # Ensure public invoke permission exists (idempotent)
           aws lambda add-permission \
