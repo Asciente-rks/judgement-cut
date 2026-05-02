@@ -30,6 +30,57 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION || 'ap-southeast-1' }}
-      - name: Update Lambda function code
+      - name: Deploy or update Lambda
+        env:
+          FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_PORT: ${{ secrets.DB_PORT || '4000' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          SCRAPER_SECRET: ${{ secrets.SCRAPER_SECRET }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY: ${{ secrets.R2_ACCESS_KEY }}
+          R2_SECRET_KEY: ${{ secrets.R2_SECRET_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          aws lambda update-function-code --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} --zip-file fileb://backend/function.zip
+          set -e
+
+          # Check if Lambda function exists
+          if aws lambda get-function --function-name "$FUNCTION_NAME" 2>/dev/null; then
+            echo "Lambda function exists, updating code and environment..."
+            aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://backend/function.zip
+          else
+            echo "Lambda function does not exist, creating..."
+            if [ -z "$ROLE_ARN" ]; then
+              echo "ERROR: LAMBDA_ROLE_ARN secret is required for creating new function"
+              exit 1
+            fi
+            aws lambda create-function \
+              --function-name "$FUNCTION_NAME" \
+              --runtime python3.11 \
+              --role "$ROLE_ARN" \
+              --handler backend.src.handler.handler \
+              --zip-file fileb://backend/function.zip \
+              --timeout 30 \
+              --memory-size 256
+          fi
+
+          # Update environment variables
+          aws lambda update-function-configuration \
+            --function-name "$FUNCTION_NAME" \
+            --environment "Variables={
+              DB_HOST=$DB_HOST,
+              DB_USERNAME=$DB_USERNAME,
+              DB_PASSWORD=$DB_PASSWORD,
+              DB_NAME=$DB_NAME,
+              DB_PORT=$DB_PORT,
+              JWT_SECRET=$JWT_SECRET,
+              SCRAPER_SECRET=$SCRAPER_SECRET,
+              R2_ACCOUNT_ID=$R2_ACCOUNT_ID,
+              R2_ACCESS_KEY=$R2_ACCESS_KEY,
+              R2_SECRET_KEY=$R2_SECRET_KEY,
+              R2_BUCKET=$R2_BUCKET
+            }"

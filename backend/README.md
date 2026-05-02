@@ -22,8 +22,18 @@ Endpoints:
 
 Deploy (CI/CD):
 
-- The repository includes `.github/workflows/deploy-lambda.yml` which packages dependencies and source, then updates an AWS Lambda function using `aws lambda update-function-code`.
-- Set the following GitHub secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `LAMBDA_FUNCTION_NAME`.
+- The repository includes `.github/workflows/deploy-lambda.yml` which packages dependencies and source, then creates or updates a Lambda function using `aws lambda create-function` or `aws lambda update-function-code` depending on whether the function already exists.
+- Set the following GitHub secrets:
+  - `AWS_ACCESS_KEY_ID` — AWS IAM access key ID
+  - `AWS_SECRET_ACCESS_KEY` — AWS IAM secret access key
+  - `AWS_REGION` — AWS region (e.g., `ap-southeast-1`, defaults to `ap-southeast-1`)
+  - `LAMBDA_FUNCTION_NAME` — Name of the Lambda function to create/update
+  - `LAMBDA_ROLE_ARN` — IAM role ARN for the Lambda function (required for creation; e.g., `arn:aws:iam::123456789012:role/lambda-execution-role`)
+  - Service credentials (all required for deployment):
+    - `DB_HOST`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME` — TiDB connection
+    - `JWT_SECRET` — JWT signing secret
+    - `SCRAPER_SECRET` — shared secret for scraper ingestion
+    - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET` — Cloudflare R2
 
 Notes:
 
@@ -40,10 +50,10 @@ Lambda handler notes:
 
 Secrets and env vars (required/optional):
 
-- `DATABASE_URL` or `DB_USERNAME`, `DB_PASSWORD`, `DB_HOST`, `DB_NAME` — TiDB connection
-- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET` — Cloudflare R2
-- `JWT_SECRET` — JWT signing secret. Use your own long random value.
-- `SCRAPER_SECRET` — shared secret between scraper and backend for ingestion
+- `DATABASE_URL` or `DB_USERNAME`, `DB_PASSWORD`, `DB_HOST`, `DB_NAME` — TiDB connection (set via GitHub secret for deployment)
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET` — Cloudflare R2 (set via GitHub secret for deployment)
+- `JWT_SECRET` — JWT signing secret. Use your own long random value. (set via GitHub secret for deployment)
+- `SCRAPER_SECRET` — shared secret between scraper and backend for ingestion (set via GitHub secret for deployment)
 
 Testing locally:
 
