@@ -5,7 +5,7 @@ from ..core.config import SECRET_KEY, ALGORITHM
 from ..db import database, users
 
 security = HTTPBearer()
-
+#lambda testing
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
