@@ -66,7 +66,7 @@ jobs:
 
           # Create or update Function URL using a temp JSON file to avoid quoting/parsing issues
           CORS_FILE=$(mktemp)
-          CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST","OPTIONS"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
+          CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
           printf '%s' "$CORS_JSON" > "$CORS_FILE"
 
           if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
