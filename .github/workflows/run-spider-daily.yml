@@ -1,0 +1,78 @@
+name: Run Spider Daily
+
+# Triggers the Zyte (Scrapinghub Cloud) spider once a day so the user
+# wakes up to fresh deal data, WITHOUT subscribing to Scrapy Cloud's
+# paid Periodic Jobs feature.
+#
+# Cron is in UTC. 18:00 UTC = 02:00 PHT (Asia/Manila, UTC+8).
+# GitHub Actions cron is FREE on public repos and uses minutes from
+# the 2000 free min/month allowance on private repos. This entire
+# workflow runs in <30 seconds, so cost is effectively nothing.
+#
+# Requires the same SHUB_API_KEY repository secret used by
+# deploy-spider.yml. The project ID is taken from
+# scrapers/scrapinghub.yml (currently 860207).
+
+on:
+  schedule:
+    # Daily at 18:00 UTC. GitHub may delay scheduled runs by a few
+    # minutes during periods of high load - if you need exact-minute
+    # precision, switch to an EventBridge schedule on AWS instead.
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify SHUB_API_KEY is set
+        env:
+          SHUB_API_KEY: ${{ secrets.SHUB_API_KEY }}
+        run: |
+          if [ -z "$SHUB_API_KEY" ]; then
+            echo "::error::SHUB_API_KEY repository secret is not set."
+            echo "::error::Add it under Settings -> Secrets and variables -> Actions."
+            echo "::error::Use the same key as deploy-spider.yml."
+            exit 1
+          fi
+          echo "SHUB_API_KEY is set (length: ${#SHUB_API_KEY})"
+
+      - name: Trigger Zyte spider via run.json
+        env:
+          SHUB_API_KEY: ${{ secrets.SHUB_API_KEY }}
+        run: |
+          # Project ID matches scrapers/scrapinghub.yml.
+          PROJECT_ID=860207
+          SPIDER=games
+
+          # Zyte's run.json takes Basic auth (api_key:) and form-encoded
+          # body. The empty password after the colon is required; the
+          # API key alone authenticates.
+          # Docs: https://docs.zyte.com/scrapy-cloud/usage-api.html#run-json
+          response=$(curl -s -w "\n%{http_code}" \
+            -u "$SHUB_API_KEY:" \
+            "https://app.zyte.com/api/run.json" \
+            -d "project=$PROJECT_ID" \
+            -d "spider=$SPIDER")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n -1)
+
+          echo "HTTP $http_code"
+          echo "Response: $body"
+
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Zyte API returned HTTP $http_code"
+            exit 1
+          fi
+
+          # Zyte returns {"status":"ok","jobid":"..."} on success.
+          # Use grep instead of jq to keep the workflow dependency-free.
+          if echo "$body" | grep -q '"status":"ok"'; then
+            jobid=$(echo "$body" | sed -n 's/.*"jobid":"\([^"]*\)".*/\1/p')
+            echo "Spider scheduled successfully. Job ID: $jobid"
+            echo "Watch progress at: https://app.zyte.com/p/$PROJECT_ID/$jobid/jobs"
+          else
+            echo "::error::Zyte rejected the run request: $body"
+            exit 1
+          fi

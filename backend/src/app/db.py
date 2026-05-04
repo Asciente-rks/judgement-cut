@@ -53,6 +53,14 @@ featured_deals = Table(
     Column("normal_price_php", Float, nullable=True),
     Column("regional_price_at", DateTime, nullable=True),
     Column("synced_at", DateTime, default=datetime.utcnow),
+    # last_seen_at: stamped to NOW() on every spider ingest.
+    # is_active: flipped to 0 by /internal/ingest/finalize for any deal
+    # whose last_seen_at is older than the current run's start time.
+    # Together they fix the "system shows 662 live deals but spider only
+    # scraped 422" inconsistency: stale entries from prior runs that
+    # came off sale stop showing up in /v1/deals/featured.
+    Column("last_seen_at", DateTime, nullable=True),
+    Column("is_active", Boolean, default=True),
 )
 
 price_history = Table(
@@ -119,6 +127,15 @@ _MIGRATIONS = [
         ")"
     ),
     "CREATE UNIQUE INDEX idx_featured_deals_deal_id ON featured_deals (deal_id)",
+    # Active-deal flagging. Added so /v1/deals/featured can filter to
+    # rows actually seen in the latest spider run instead of returning
+    # everything ever inserted (which previously caused the 662 vs 422
+    # mismatch). Default is_active=1 so existing rows survive the
+    # migration and get correctly flipped to 0 by the next finalize call.
+    "ALTER TABLE featured_deals ADD COLUMN last_seen_at DATETIME NULL",
+    "ALTER TABLE featured_deals ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1",
+    # Index supports the WHERE is_active=1 filter on /v1/deals/featured.
+    "CREATE INDEX idx_featured_deals_is_active ON featured_deals (is_active)",
 ]
 
 

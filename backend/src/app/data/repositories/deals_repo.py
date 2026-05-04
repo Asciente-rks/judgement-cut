@@ -1,11 +1,19 @@
 """featured_deals repository.
 
-Inserts go through `upsert_featured_deal` which uses MySQL-style
+Inserts go through `insert_featured_deal` which uses MySQL-style
 INSERT ... ON DUPLICATE KEY UPDATE (relies on the unique index on
 deal_id added in db.py migrations). This stops the spider's daily
 re-ingestion from filling the table with duplicates.
+
+Active vs stale deals:
+  Each upsert stamps `last_seen_at = NOW()` and `is_active = 1`. At end
+  of crawl, /internal/ingest/finalize calls `mark_stale_deals_inactive`
+  which flips is_active=0 on any row whose last_seen_at is older than
+  the run's start time. /v1/deals/featured then filters to is_active=1
+  so the dashboard's "live deals" count reflects the latest crawl, not
+  every deal ever seen.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -47,8 +55,16 @@ _UPSERT_REFRESH_COLUMNS = {
 
 
 async def get_featured_deals(limit: int = 20):
+    """Return active deals ordered by deal_rating desc.
+
+    `is_active = 1` filter excludes stale deals from previous runs that
+    are no longer on sale. Without this filter the table grows unbounded
+    (no expiration logic) and the dashboard's "live deals" count drifts
+    upward forever.
+    """
     query = (
         featured_deals.select()
+        .where(featured_deals.c.is_active == True)  # noqa: E712 (SQLAlchemy)
         .order_by(featured_deals.c.deal_rating.desc())
         .limit(limit)
     )
@@ -85,22 +101,35 @@ async def insert_featured_deal(deal: dict):
     """Upsert by deal_id.
 
     Existing rows have their `_UPSERT_REFRESH_COLUMNS` overwritten and
-    `synced_at` updated. The native regional-pricing columns are left
-    alone (they're maintained by the Steam enrichment path).
+    `synced_at` / `last_seen_at` / `is_active` updated. The native
+    regional-pricing columns are left alone (they're maintained by the
+    Steam enrichment path).
+
+    Stamping last_seen_at and flipping is_active=1 here is what lets
+    the finalize step at end of crawl distinguish "seen this run" from
+    "stale, came off sale, mark inactive".
     """
     cleaned = {k: v for k, v in deal.items() if k in _ALLOWED_COLUMNS}
     if not cleaned or not cleaned.get("deal_id"):
         return
 
-    cleaned["synced_at"] = datetime.utcnow()
+    now = datetime.utcnow()
+    cleaned["synced_at"] = now
 
-    stmt = mysql_insert(featured_deals).values(**cleaned)
+    # last_seen_at and is_active aren't user-provided - they're owned
+    # by this upsert path. Set them outside the _ALLOWED_COLUMNS check
+    # so callers can't override them.
+    full_values = {**cleaned, "last_seen_at": now, "is_active": True}
+
+    stmt = mysql_insert(featured_deals).values(**full_values)
     update_payload = {
         c: stmt.inserted[c]
         for c in cleaned
         if c in _UPSERT_REFRESH_COLUMNS
     }
     update_payload["synced_at"] = stmt.inserted["synced_at"]
+    update_payload["last_seen_at"] = stmt.inserted["last_seen_at"]
+    update_payload["is_active"] = stmt.inserted["is_active"]
     stmt = stmt.on_duplicate_key_update(**update_payload)
     await database.execute(stmt)
 
@@ -127,5 +156,31 @@ async def update_regional_pricing(deal_id: str, *,
             normal_price_php=normal_price_php,
             regional_price_at=datetime.utcnow(),
         )
+    )
+    return await database.execute(query)
+
+
+async def mark_stale_deals_inactive(run_started_at_epoch: int) -> int:
+    """Set is_active=0 for any deal not seen in the latest crawl.
+
+    Called by /internal/ingest/finalize at end of run. The threshold is
+    the spider's run start time (epoch seconds). Any row whose
+    last_seen_at is NULL (never seen, including pre-migration rows) or
+    older than the threshold is considered stale.
+
+    Returns the number of rows marked inactive so the caller can log /
+    surface that on the admin monitor.
+    """
+    threshold = datetime.utcfromtimestamp(int(run_started_at_epoch))
+    query = (
+        featured_deals.update()
+        .where(
+            (featured_deals.c.is_active == True)  # noqa: E712
+            & (
+                (featured_deals.c.last_seen_at == None)  # noqa: E711
+                | (featured_deals.c.last_seen_at < threshold)
+            )
+        )
+        .values(is_active=False)
     )
     return await database.execute(query)

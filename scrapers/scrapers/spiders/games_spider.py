@@ -17,13 +17,32 @@ class GamesSpider(scrapy.Spider):
 
     # CheapShark caps pageSize at 60 per request. We paginate per-store
     # because the user shops mostly on Steam, so Steam gets a much
-    # deeper crawl while GOG / Humble stay shallow. Total ~428 deals
-    # per run × once-daily schedule = ~12.8k Lambda invocations/month,
-    # comfortably under the free-tier 1M cap.
+    # deeper crawl while GOG / Humble stay shallow.
+    #
+    # Steam-specific filters (from CheapShark API):
+    #   sortBy=Reviews   -> rank by Steam reviews count (popularity proxy),
+    #                       so we always grab AAA + popular indie hits like
+    #                       Sons of the Forest / Raft / Valheim and skip the
+    #                       long tail of asset-flip shovelware.
+    #   steamRating=70   -> only deals with Steam % positive >= 70, which
+    #                       further filters out poorly-reviewed games.
+    #
+    # GOG / Humble keep the default sort because the user said those are
+    # fine as-is (they're shallow enough that quality filtering isn't
+    # worth a separate code path).
+    #
+    # Total ~600 quality Steam deals + 60 GOG + 60 Humble + ~5 Epic free
+    # = ~725 items per run. With batched ingest (25/POST) this is ~30
+    # Lambda invocations/day = ~900/month, comfortably under the 1M
+    # free tier even with other apps deployed.
     CHEAPSHARK_STORES = {
-        "steam": {"id": "1", "pages": 5},   # 300 deals/day, deep coverage
-        "gog": {"id": "7", "pages": 1},     # 60 deals/day, top deals only
-        "humble": {"id": "11", "pages": 1}, # 60 deals/day, top deals only
+        "steam": {
+            "id": "1",
+            "pages": 8,
+            "extra_params": {"sortBy": "Reviews", "steamRating": 70},
+        },
+        "gog": {"id": "7", "pages": 1},
+        "humble": {"id": "11", "pages": 1},
     }
 
     # Epic's API ships an array of typed images per game. We pick the
@@ -41,12 +60,14 @@ class GamesSpider(scrapy.Spider):
         for store_name, cfg in self.CHEAPSHARK_STORES.items():
             store_id = cfg["id"]
             pages = cfg["pages"]
+            extra_params = cfg.get("extra_params") or {}
             for page_num in range(pages):
                 params = {
                     "storeID": store_id,
                     "pageSize": 60,
                     "pageNumber": page_num,
                     "onSale": 1,
+                    **extra_params,
                 }
                 url = f"{self.CHEAPSHARK_DEALS}?" + "&".join(
                     f"{k}={v}" for k, v in params.items()
