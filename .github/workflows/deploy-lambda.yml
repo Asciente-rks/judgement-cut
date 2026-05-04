@@ -16,14 +16,28 @@ jobs:
       - name: Install dependencies into package dir
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt -t backend/package
+          pip install -r backend/requirements.txt -t backend/package --no-cache-dir
+      - name: Strip package to fit Lambda direct-upload size limit
+        run: |
+          # boto3 / botocore / s3transfer ship in the Lambda Python 3.11 runtime,
+          # so we don't need to bundle them. Saves ~12 MB.
+          rm -rf backend/package/boto3 backend/package/botocore backend/package/s3transfer
+          # Strip bytecode caches and test directories - never needed at runtime.
+          find backend/package -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+          find backend/package -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
+          find backend/package -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+          echo "Package size after strip:"
+          du -sh backend/package
       - name: Copy source
         run: |
           cp -r backend/src/* backend/package/
       - name: Zip
         run: |
           cd backend/package
-          zip -r ../function.zip .
+          zip -qr ../function.zip .
+          cd ..
+          echo "function.zip size:"
+          ls -lh function.zip
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -40,14 +54,37 @@ jobs:
           # Check if Lambda function exists (suppress stdout/stderr to avoid leaking env variables)
           if aws lambda get-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             echo "Lambda function exists, updating code..."
-            aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://backend/function.zip >/dev/null
-            aws lambda wait function-updated --function-name "$FUNCTION_NAME"
-            aws lambda update-function-configuration \
+            aws lambda update-function-code \
               --function-name "$FUNCTION_NAME" \
-              --runtime python3.11 \
-              --handler handler.handler \
-              --timeout 30 \
-              --memory-size 256 >/dev/null
+              --zip-file fileb://backend/function.zip >/dev/null
+            aws lambda wait function-updated --function-name "$FUNCTION_NAME"
+
+            echo "Updating function configuration..."
+            # Retry update-function-configuration: occasionally Lambda still
+            # reports the function as updating right after the wait returns,
+            # producing a transient ResourceConflictException.
+            for attempt in 1 2 3 4 5; do
+              if aws lambda update-function-configuration \
+                --function-name "$FUNCTION_NAME" \
+                --runtime python3.11 \
+                --handler handler.handler \
+                --timeout 30 \
+                --memory-size 256 >/dev/null 2>conf_err.log; then
+                echo "Configuration updated."
+                rm -f conf_err.log
+                break
+              fi
+              if grep -q ResourceConflictException conf_err.log; then
+                echo "Attempt $attempt: function still updating, retrying in 5s..."
+                sleep 5
+                aws lambda wait function-updated --function-name "$FUNCTION_NAME" || true
+                continue
+              fi
+              # Different error - surface it and fail
+              cat conf_err.log >&2
+              exit 1
+            done
+            aws lambda wait function-updated --function-name "$FUNCTION_NAME"
           else
             echo "Lambda function does not exist, creating..."
             if [ -z "$ROLE_ARN" ]; then
@@ -62,62 +99,54 @@ jobs:
               --zip-file fileb://backend/function.zip \
               --timeout 30 \
               --memory-size 256 >/dev/null 2>&1
+            aws lambda wait function-active-v2 --function-name "$FUNCTION_NAME"
             echo "Lambda function created. Please set environment variables in AWS Lambda console."
           fi
-      - name: Create or update Function URL
+      - name: Ensure Function URL exists (do not regenerate)
         env:
           FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
         run: |
           set -e
 
-          # Create or update Function URL using a temp JSON file to avoid quoting/parsing issues
           CORS_FILE=$(mktemp)
           CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
           printf '%s' "$CORS_JSON" > "$CORS_FILE"
 
-          # Recreate Function URL config to avoid stale auth state
-          aws lambda delete-function-url-config \
-            --function-name "$FUNCTION_NAME" >/dev/null 2>&1 || true
-
-          aws lambda create-function-url-config \
-            --function-name "$FUNCTION_NAME" \
-            --auth-type NONE \
-            --cors file://"$CORS_FILE" \
-            --query 'FunctionUrl' --output text
+          # If a Function URL config already exists, update CORS in place.
+          # The URL itself is preserved across updates - only delete+create
+          # would change it, which is exactly what we want to avoid.
+          if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
+            echo "Function URL exists - updating CORS only (URL stays the same)."
+            aws lambda update-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --cors file://"$CORS_FILE" \
+              --query 'FunctionUrl' --output text
+          else
+            echo "Function URL does not exist - creating for the first time."
+            aws lambda create-function-url-config \
+              --function-name "$FUNCTION_NAME" \
+              --auth-type NONE \
+              --cors file://"$CORS_FILE" \
+              --query 'FunctionUrl' --output text
+          fi
 
           rm -f "$CORS_FILE"
 
-          # Ensure public invoke permission exists (refresh to avoid stale policy)
-          aws lambda remove-permission \
-            --function-name "$FUNCTION_NAME" \
-            --statement-id AllowPublicInvoke >/dev/null 2>&1 || true
-
+          # Idempotently ensure public invoke permission. add-permission returns
+          # ResourceConflictException if the statement already exists, which is
+          # benign - we only care that it ends up present.
           aws lambda add-permission \
             --function-name "$FUNCTION_NAME" \
-            --statement-id AllowPublicInvoke \
+            --statement-id AllowPublicInvokeFunctionUrl \
             --action lambda:InvokeFunctionUrl \
             --principal '*' \
-            --function-url-auth-type NONE >/dev/null 2>&1 || true
+            --function-url-auth-type NONE >/dev/null 2>&1 \
+            && echo "Added AllowPublicInvokeFunctionUrl permission" \
+            || echo "AllowPublicInvokeFunctionUrl permission already present"
 
-          aws lambda remove-permission \
-            --function-name "$FUNCTION_NAME" \
-            --statement-id AllowPublicInvokeFunction >/dev/null 2>&1 || true
-
-          aws lambda add-permission \
-            --function-name "$FUNCTION_NAME" \
-            --statement-id AllowPublicInvokeFunction \
-            --action lambda:InvokeFunction \
-            --principal '*' \
-            --invoked-via-function-url >/dev/null 2>&1 || true
-
-          echo "Function URL config:"
+          echo "Final Function URL config:"
           aws lambda get-function-url-config \
             --function-name "$FUNCTION_NAME" \
             --query '{FunctionUrl:FunctionUrl,AuthType:AuthType,Cors:Cors}' \
             --output json
-
-          echo "Function URL policy:"
-          aws lambda get-policy \
-            --function-name "$FUNCTION_NAME" \
-            --query 'Policy' \
-            --output text || true
