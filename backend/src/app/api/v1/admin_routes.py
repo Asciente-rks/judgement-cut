@@ -9,8 +9,12 @@ from typing import List
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from ...api.dependencies import require_admin
-from ...db import database, platforms, users
-from ...data.repositories.crawler_repo import upsert_crawler_setting
+from ...api.internal import LAST_INGEST_AT_KEY, LAST_INGEST_COUNT_KEY
+from ...db import database, featured_deals, platforms, users
+from ...data.repositories.crawler_repo import (
+    get_crawler_setting,
+    upsert_crawler_setting,
+)
 from ...data.repositories.platforms_repo import set_platform_enabled
 from ...data.storage import (
     delete_file_from_r2,
@@ -56,21 +60,81 @@ async def set_crawler_setting(key: str, value: str,
 
 @router.get("/monitor/scraper")
 async def monitor_scraper(_=Depends(require_admin)):
-    """Quick health check on the upstream we depend on (CheapShark)."""
+    """Health snapshot of the data pipeline.
+
+    Returns enough signal for the admin panel to tell at a glance:
+      - Is CheapShark itself reachable? (upstream health)
+      - When did our spider last successfully POST to /internal/ingest?
+        (spider->Lambda link health)
+      - How many deals are currently in the DB?
+      - Is R2 wired up?
+    """
+    from datetime import datetime, timezone
     import httpx
+    from sqlalchemy import func, select
+
+    status: dict = {}
+
+    # 1. Upstream check. Pass storeID so CheapShark answers 200 (it
+    #    returns 400 on bare /deals without a filter).
     try:
         r = httpx.get(
             "https://www.cheapshark.com/api/1.0/deals",
-            params={"pageSize": 1},
+            params={"storeID": "1", "pageSize": 1},
             timeout=5,
         )
-        status = {"cheapshark_status": r.status_code}
+        status["cheapshark_status"] = r.status_code
+        status["cheapshark_ok"] = r.status_code == 200
     except Exception as exc:
-        status = {"cheapshark_error": str(exc)}
-    # Zyte integration requires API key — left as placeholder.
+        status["cheapshark_error"] = str(exc)
+        status["cheapshark_ok"] = False
+
+    # 2. Spider heartbeat. Set by /internal/ingest each time the spider
+    #    successfully reaches us.
+    last_ts_raw = await get_crawler_setting(LAST_INGEST_AT_KEY)
+    last_count_raw = await get_crawler_setting(LAST_INGEST_COUNT_KEY)
+    if last_ts_raw:
+        try:
+            ts = int(last_ts_raw)
+            iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            now = datetime.now(tz=timezone.utc).timestamp()
+            status["last_ingest_at"] = iso
+            status["last_ingest_seconds_ago"] = int(now - ts)
+        except (ValueError, TypeError):
+            status["last_ingest_at"] = None
+    else:
+        status["last_ingest_at"] = None
+
+    if last_count_raw:
+        try:
+            status["last_ingest_count"] = int(last_count_raw)
+        except (ValueError, TypeError):
+            status["last_ingest_count"] = None
+    else:
+        status["last_ingest_count"] = None
+
+    # 3. DB row count, so the operator can spot empty/stale tables.
+    try:
+        row = await database.fetch_one(
+            select(func.count()).select_from(featured_deals)
+        )
+        status["featured_deals_count"] = int(row[0]) if row else 0
+    except Exception as exc:
+        status["featured_deals_error"] = str(exc)
+        status["featured_deals_count"] = None
+
+    # 4. Static config flags - useful when nothing else explains the silence.
     status["zyte"] = "not-configured"
     status["r2_configured"] = r2_is_configured()
+    status["scraper_secret_set"] = bool(_scraper_secret_present())
+
     return status
+
+
+def _scraper_secret_present() -> bool:
+    # Imported lazily so a missing config module doesn't blow up imports.
+    from ...core import config as _cfg
+    return bool(getattr(_cfg, "SCRAPER_SECRET", None))
 
 
 # ---------------------------------------------------------------------------

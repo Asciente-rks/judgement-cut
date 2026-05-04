@@ -1,10 +1,25 @@
+"""Spider <-> backend internal endpoints.
+
+Gated by the X-Scraper-Secret header. The spider POSTs deal items here;
+the admin monitor reads back a heartbeat so we can tell from the UI
+whether the spider is reaching us.
+"""
+import time
 from fastapi import APIRouter, Header, HTTPException, Request
-from typing import Optional, List
+from typing import Optional
+
 from ..core import config
+from ..data.repositories.crawler_repo import upsert_crawler_setting
 from ..data.repositories.deals_repo import insert_featured_deal
 from ..data.repositories.price_history_repo import insert_price_record
 
 router = APIRouter()
+
+
+# crawler_settings keys used as a heartbeat. Any successful /ingest call
+# updates these; the admin scraper-monitor endpoint reads them back.
+LAST_INGEST_AT_KEY = "_last_ingest_at"
+LAST_INGEST_COUNT_KEY = "_last_ingest_count"
 
 
 def _normalize_thumbnail(value):
@@ -51,5 +66,16 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
         except Exception:
             # continue on errors to be robust
             continue
+
+    # Heartbeat: record when the spider last reached us and how much it
+    # delivered. The admin monitor surfaces this so the operator can tell
+    # at a glance whether the pipeline is alive.
+    try:
+        now_iso = str(int(time.time()))
+        await upsert_crawler_setting(LAST_INGEST_AT_KEY, now_iso)
+        await upsert_crawler_setting(LAST_INGEST_COUNT_KEY, str(inserted))
+    except Exception:
+        # Heartbeat failure shouldn't poison the ingest call.
+        pass
 
     return {"inserted": inserted}
