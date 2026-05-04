@@ -96,3 +96,15 @@ jobs:
             --action lambda:InvokeFunctionUrl \
             --principal '*' \
             --function-url-auth-type NONE >/dev/null 2>&1 || true
+
+          echo "Function URL config:"
+          aws lambda get-function-url-config \
+            --function-name "$FUNCTION_NAME" \
+            --query '{FunctionUrl:FunctionUrl,AuthType:AuthType,Cors:Cors}' \
+            --output json
+
+          echo "Function URL policy:"
+          aws lambda get-policy \
+            --function-name "$FUNCTION_NAME" \
+            --query 'Policy' \
+            --output text || true
