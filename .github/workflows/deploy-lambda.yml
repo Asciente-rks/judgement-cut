@@ -85,7 +85,11 @@ jobs:
 
           rm -f "$CORS_FILE"
 
-          # Ensure public invoke permission exists (idempotent)
+          # Ensure public invoke permission exists (refresh to avoid stale policy)
+          aws lambda remove-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id AllowPublicInvoke >/dev/null 2>&1 || true
+
           aws lambda add-permission \
             --function-name "$FUNCTION_NAME" \
             --statement-id AllowPublicInvoke \
