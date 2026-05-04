@@ -7,6 +7,14 @@ from ..data.repositories.price_history_repo import insert_price_record
 router = APIRouter()
 
 
+def _normalize_thumbnail(value):
+    """The CheapShark `thumb` field is a URL string. Reject anything else."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value.startswith("http") else None
+
+
 @router.post("/ingest")
 async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None)):
     # Validate secret
@@ -21,7 +29,9 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
 
     inserted = 0
     for it in items:
-        # map fields expected by featured_deals table
+        # Map fields expected by featured_deals table. The spider sends
+        # `thumbnail_url` (CheapShark's `thumb`); the bare CheapShark
+        # response uses `thumb`; tolerate both for forwards-compat.
         deal = {
             "deal_id": it.get("deal_id") or it.get("dealID") or it.get("id"),
             "title": it.get("title"),
@@ -29,6 +39,9 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
             "price": float(it.get("price")) if it.get("price") is not None else None,
             "normal_price": float(it.get("normal_price") or it.get("normalPrice") or 0),
             "deal_rating": float(it.get("deal_rating") or 0.0),
+            "thumbnail_url": _normalize_thumbnail(
+                it.get("thumbnail_url") or it.get("thumb") or it.get("thumbnail")
+            ),
         }
         try:
             await insert_featured_deal(deal)
