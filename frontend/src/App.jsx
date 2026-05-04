@@ -818,6 +818,13 @@ function DealCard({
       ? `₱${regional.normal.toFixed(2)}`
       : formatPrice(normal, currency, fxRate);
 
+  // Whether the displayed price is an approximation (USD * FX) vs a
+  // native Steam PH price. Any non-free deal where we don't have a
+  // regional PHP price shows up as "USD est." so the user knows the
+  // number is fuzzy rather than the exact thing they'll pay on Steam.
+  // (Currency=USD mode also shows raw USD - no badge needed there.)
+  const isUsdEstimate = !free && !regional && currency === "PHP";
+
   // Render the origin URL straight from the deal payload. We only call
   // /v1/deals/{id}/thumbnail (which mirrors to R2) if the origin <img>
   // fails to load, keeping the happy path at zero Lambda cost per card.
@@ -863,6 +870,13 @@ function DealCard({
             {regional ? (
               <div className="mt-1 text-[10px] uppercase tracking-widest text-emerald-200/70">
                 Steam PH price
+              </div>
+            ) : isUsdEstimate ? (
+              <div
+                className="mt-1 text-[10px] uppercase tracking-widest text-amber-200/70"
+                title="Native Steam PH price wasn't available for this deal, so we're showing a USD-converted estimate. The actual store price may differ."
+              >
+                USD est.
               </div>
             ) : null}
           </div>
