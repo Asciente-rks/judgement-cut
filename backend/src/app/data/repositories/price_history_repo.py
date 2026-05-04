@@ -35,5 +35,14 @@ async def get_price_history_for_deal(deal_id: str, limit: int = 50):
 
 async def insert_price_record(deal_id: str, price: float):
     # Stored as-given (CheapShark already provides the URL-encoded form).
-    q = price_history.insert().values(deal_id=deal_id, price=price)
+    # SQLAlchemy column defaults aren't invoked when inserts go through
+    # the `databases` library (it runs raw SQL), so set recorded_at
+    # explicitly. Older rows in the table have NULL here; the frontend
+    # falls back gracefully when it sees that.
+    from datetime import datetime
+    q = price_history.insert().values(
+        deal_id=deal_id,
+        price=price,
+        recorded_at=datetime.utcnow(),
+    )
     await database.execute(q)

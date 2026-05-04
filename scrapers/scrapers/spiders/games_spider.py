@@ -22,9 +22,12 @@ class GamesSpider(scrapy.Spider):
     }
 
     # CheapShark caps pageSize at 60. To show more than 60 deals per
-    # store on the dashboard we paginate. 3 pages = up to 180 deals
-    # per store = ~540 total, plenty without hammering the API.
-    CHEAPSHARK_PAGES = 3
+    # store on the dashboard we paginate. 2 pages = up to 120 deals
+    # per store = ~368 total + Epic. Conservative choice that gives
+    # the dashboard real depth without quadrupling Lambda invocations.
+    # Bump to 3+ when scaling matters; CheapShark's pagination is
+    # cheap on their side too.
+    CHEAPSHARK_PAGES = 2
 
     # Epic's API ships an array of typed images per game. We pick the
     # first one matching any of these (in order) for the thumbnail.
