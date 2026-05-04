@@ -21,6 +21,11 @@ class GamesSpider(scrapy.Spider):
         "humble": "11",
     }
 
+    # CheapShark caps pageSize at 60. To show more than 60 deals per
+    # store on the dashboard we paginate. 3 pages = up to 180 deals
+    # per store = ~540 total, plenty without hammering the API.
+    CHEAPSHARK_PAGES = 3
+
     # Epic's API ships an array of typed images per game. We pick the
     # first one matching any of these (in order) for the thumbnail.
     _EPIC_IMAGE_PRIORITY = (
@@ -31,25 +36,34 @@ class GamesSpider(scrapy.Spider):
     )
 
     def start_requests(self):
-        # CheapShark sales per platform
+        # CheapShark sales per platform, paginated. CheapShark uses
+        # 0-indexed pageNumber and a cap of 60 results per page.
         for store_name, store_id in self.CHEAPSHARK_STORES.items():
-            params = {
-                "storeID": store_id,
-                "pageSize": 60,
-                "onSale": 1,
-            }
-            url = f"{self.CHEAPSHARK_DEALS}?" + "&".join(f"{k}={v}" for k, v in params.items())
-            yield scrapy.Request(
-                url,
-                callback=self.parse_cheapshark,
-                errback=self.errback_cheapshark,
-                cb_kwargs={"store_name": store_name, "store_id": store_id},
-                headers={"Accept": "application/json"},
-                # Don't let middlewares filter this on duplicate URL or
-                # cache - we always want a live hit so the diagnostic
-                # logs reflect the current state.
-                dont_filter=True,
-            )
+            for page_num in range(self.CHEAPSHARK_PAGES):
+                params = {
+                    "storeID": store_id,
+                    "pageSize": 60,
+                    "pageNumber": page_num,
+                    "onSale": 1,
+                }
+                url = f"{self.CHEAPSHARK_DEALS}?" + "&".join(
+                    f"{k}={v}" for k, v in params.items()
+                )
+                yield scrapy.Request(
+                    url,
+                    callback=self.parse_cheapshark,
+                    errback=self.errback_cheapshark,
+                    cb_kwargs={
+                        "store_name": store_name,
+                        "store_id": store_id,
+                        "page_num": page_num,
+                    },
+                    headers={"Accept": "application/json"},
+                    # Don't let middlewares filter this on duplicate URL or
+                    # cache - we always want a live hit so the diagnostic
+                    # logs reflect the current state.
+                    dont_filter=True,
+                )
 
         # Epic free games (official store feed)
         yield scrapy.Request(
@@ -71,12 +85,13 @@ class GamesSpider(scrapy.Spider):
             repr(failure.value),
         )
 
-    def parse_cheapshark(self, response, store_name, store_id):
+    def parse_cheapshark(self, response, store_name, store_id, page_num=0):
         # Diagnostic: log status, length and content-type so we can tell
         # whether Zyte's IPs are hitting a 200-empty / 403 / HTML wall.
         self.logger.info(
-            "CheapShark store=%s status=%s length=%d content-type=%s",
+            "CheapShark store=%s page=%d status=%s length=%d content-type=%s",
             store_name,
+            page_num,
             response.status,
             len(response.text),
             response.headers.get(b"Content-Type", b"").decode("utf-8", "ignore"),

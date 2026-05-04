@@ -56,12 +56,26 @@ async def get_featured_deals(limit: int = 20):
     return [dict(r) for r in rows]
 
 
+def _normalize_deal_id(deal_id: str) -> str:
+    """Re-encode `=` to `%3D`.
+
+    CheapShark deal_ids are stored with the URL-encoded `%3D` suffix,
+    but Lambda Function URL infrastructure decodes the path twice
+    (once at the AWS HTTP frontend, once in Starlette) before it
+    reaches us, leaving `=`. Normalize to match the stored form.
+    """
+    if not deal_id:
+        return deal_id
+    return deal_id.replace("=", "%3D")
+
+
 async def get_deal_by_id(deal_id: str):
     """Return the row for this deal_id, or None.
 
     With the UNIQUE INDEX in place, deal_id is a primary lookup key
     (only one row per deal_id ever exists).
     """
+    deal_id = _normalize_deal_id(deal_id)
     query = featured_deals.select().where(featured_deals.c.deal_id == deal_id)
     row = await database.fetch_one(query)
     return dict(row) if row else None
