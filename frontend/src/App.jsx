@@ -221,9 +221,9 @@ export default function App() {
     setDealsLoading(true);
     setDealsError(null);
     try {
-      // CheapShark caps each store at 60 deals; with 3 stores + Epic
-      // free we max around ~190. 250 leaves headroom for future stores.
-      const data = await fetchFeaturedDeals(session.token, 250);
+      // The spider paginates 3 pages × 60 per CheapShark store + ~8
+      // Epic free games = up to ~550 deals. 1000 leaves headroom.
+      const data = await fetchFeaturedDeals(session.token, 1000);
       setDeals(Array.isArray(data) ? data : []);
     } catch (err) {
       setDealsError(err.message || String(err));
