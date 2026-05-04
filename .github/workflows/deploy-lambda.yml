@@ -67,11 +67,12 @@ jobs:
           find backend/package -type f \( -iname "README*" -o -iname "CHANGELOG*" -o -iname "CHANGES*" -o -iname "HISTORY*" -o -iname "AUTHORS*" -o -iname "NOTICE*" -o -iname "*.md" -o -iname "*.rst" \) -delete
 
           # === dist-info chaff (keep METADATA for importlib.metadata; drop the rest) ===
-          # RECORD = file checksums, never needed at runtime; LICENSE files
-          # are ~5-10 KB each but add up across 30+ packages.
-          find backend/package -path "*.dist-info/RECORD" -delete
-          find backend/package -path "*.dist-info/LICENSE*" -delete
-          find backend/package -path "*.dist-info/NOTICE*" -delete
+          # RECORD = file checksums; LICENSE/NOTICE = legal text; WHEEL =
+          # wheel-build metadata; INSTALLER/REQUESTED/top_level.txt =
+          # pip-internal markers. None of these are read at runtime.
+          for f in RECORD LICENSE LICENSE.txt NOTICE NOTICE.txt WHEEL INSTALLER REQUESTED top_level.txt; do
+            find backend/package -path "*.dist-info/$f" -delete 2>/dev/null || true
+          done
 
           echo "Package size after strip:"
           du -sh backend/package
@@ -83,7 +84,10 @@ jobs:
       - name: Zip
         run: |
           cd backend/package
-          zip -qr ../function.zip .
+          # -9 = maximum compression. ~1-3% smaller on Python wheels
+          # vs the default level 6. Worth a couple seconds of extra
+          # CPU when we're up against AWS's request-size cap.
+          zip -9qr ../function.zip .
           cd ..
           echo "function.zip size:"
           ls -lh function.zip
