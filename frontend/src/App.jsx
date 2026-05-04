@@ -103,6 +103,23 @@ function pickNormalPrice(deal) {
   return null;
 }
 
+// Steam-native regional pricing pre-fetched by the backend during
+// /internal/ingest. Returns {sale, normal} when available, else null
+// so the caller falls back to FX-converted USD.
+function pickRegionalPhpPrice(deal) {
+  const sale = deal.price_php;
+  const normal = deal.normal_price_php;
+  if (sale === null || sale === undefined) return null;
+  const saleNum = Number(sale);
+  if (Number.isNaN(saleNum)) return null;
+  const normalNum =
+    normal === null || normal === undefined ? null : Number(normal);
+  return {
+    sale: saleNum,
+    normal: Number.isNaN(normalNum) ? null : normalNum,
+  };
+}
+
 function pickThumbnail(deal) {
   return deal.thumbnail_url || deal.thumb || deal.thumbnail || null;
 }
@@ -204,7 +221,9 @@ export default function App() {
     setDealsLoading(true);
     setDealsError(null);
     try {
-      const data = await fetchFeaturedDeals(session.token, 80);
+      // CheapShark caps each store at 60 deals; with 3 stores + Epic
+      // free we max around ~190. 250 leaves headroom for future stores.
+      const data = await fetchFeaturedDeals(session.token, 250);
       setDeals(Array.isArray(data) ? data : []);
     } catch (err) {
       setDealsError(err.message || String(err));
@@ -598,6 +617,11 @@ function DashboardView({
   );
 }
 
+// Default visible per section. Cards beyond this stay hidden until the
+// user clicks "Show all". Fits ~3 rows of 4 cards on desktop / 6 rows
+// of 2 on mobile - dense enough to feel populated without overwhelming.
+const DEFAULT_VISIBLE = 12;
+
 function PlatformSection({
   platform,
   items,
@@ -608,14 +632,19 @@ function PlatformSection({
   onOpenHistory,
   loading,
 }) {
-  const display = items.slice(0, 4);
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, DEFAULT_VISIBLE);
+  const hiddenCount = Math.max(0, items.length - DEFAULT_VISIBLE);
+
   return (
     <div className="glass-card rounded-3xl p-6 md:p-8">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-2xl">{platform.label}</h2>
           <p className="text-sm text-slate-200/70">
-            {platform.free ? "Free games only" : "Live sales and discounts"}
+            {platform.free
+              ? `Free games only · ${items.length} active`
+              : `Live sales and discounts · ${items.length} on sale`}
           </p>
         </div>
         <div
@@ -626,12 +655,12 @@ function PlatformSection({
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {display.map((deal, idx) => (
+        {visible.map((deal, idx) => (
           <DealCard
             key={dealId(deal) || idx}
             deal={deal}
             free={platform.free}
-            delay={revealDelay + idx * 0.06}
+            delay={revealDelay + Math.min(idx, 8) * 0.06}
             currency={currency}
             fxRate={fxRate}
             token={token}
@@ -640,9 +669,26 @@ function PlatformSection({
         ))}
       </div>
 
-      {display.length === 0 ? (
+      {hiddenCount > 0 ? (
+        <div className="mt-6 flex justify-center">
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="rounded-full border border-white/20 px-5 py-2 text-sm text-slate-100/80 transition hover:border-sky-300/50 hover:text-white"
+          >
+            {expanded
+              ? `Collapse (showing ${items.length})`
+              : `Show all ${items.length}`}
+          </button>
+        </div>
+      ) : null}
+
+      {visible.length === 0 ? (
         <div className="mt-6 text-sm text-slate-200/70">
-          {loading ? "Loading..." : "No items yet. Waiting for the next crawl."}
+          {loading
+            ? "Loading..."
+            : platform.free
+              ? "No active free promotions right now."
+              : "No items yet. Waiting for the next crawl."}
         </div>
       ) : null}
     </div>
@@ -667,6 +713,22 @@ function DealCard({
   const normal = pickNormalPrice(deal);
   const storeName = resolveStoreLabel(deal);
   const savings = deal.savings ? `${Number(deal.savings).toFixed(0)}%` : "";
+
+  // For Steam deals where the backend has fetched native PHP pricing
+  // from store.steampowered.com, use that directly when the user is in
+  // PHP mode. Otherwise fall back to the USD * FX conversion which is
+  // an approximation. The native price exactly matches what the user
+  // would see on Steam's storefront.
+  const regional = currency === "PHP" ? pickRegionalPhpPrice(deal) : null;
+  const saleDisplay = free
+    ? "FREE"
+    : regional
+      ? `₱${regional.sale.toFixed(2)}`
+      : formatPrice(price, currency, fxRate);
+  const normalDisplay =
+    regional && regional.normal !== null
+      ? `₱${regional.normal.toFixed(2)}`
+      : formatPrice(normal, currency, fxRate);
 
   // Render the origin URL straight from the deal payload. We only call
   // /v1/deals/{id}/thumbnail (which mirrors to R2) if the origin <img>
@@ -706,12 +768,15 @@ function DealCard({
         </div>
         <div className="mt-3 flex items-end justify-between">
           <div>
-            <div className="text-lg font-semibold text-glow">
-              {free ? "FREE" : formatPrice(price, currency, fxRate)}
-            </div>
+            <div className="text-lg font-semibold text-glow">{saleDisplay}</div>
             <div className="text-xs text-slate-200/60 line-through">
-              {formatPrice(normal, currency, fxRate)}
+              {normalDisplay}
             </div>
+            {regional ? (
+              <div className="mt-1 text-[10px] uppercase tracking-widest text-emerald-200/70">
+                Steam PH price
+              </div>
+            ) : null}
           </div>
           {savings ? (
             <div className="rounded-full border border-emerald-300/40 bg-emerald-400/10 px-2 py-1 text-xs text-emerald-200">
