@@ -1,8 +1,8 @@
 from typing import Any, Dict, List
 from .cheapshark import fetch_deals as live_fetch
-from ..data.repositories.deals_repo import get_featured_deals
-from ..data.repositories.platforms_repo import get_enabled_platforms
-from ..data.repositories.price_history_repo import get_price_history_for_deal, insert_price_record
+from ...data.repositories.deals_repo import get_featured_deals
+from ...data.repositories.platforms_repo import get_enabled_platforms
+from ...data.repositories.price_history_repo import get_price_history_for_deal, insert_price_record
 
 # CheapShark store IDs for the platforms seeded in the DB
 CHEAPSHARK_STORE_ID_MAP = {
