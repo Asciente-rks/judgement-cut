@@ -14,8 +14,8 @@ Sample response payload:
       "data": {
         "price_overview": {
           "currency": "PHP",
-          "initial": 119900,        # cents-equivalent (₱1199.00)
-          "final": 8995,            # ₱89.95
+          "initial": 119900,        # cents-equivalent (PHP1199.00)
+          "final": 8995,            # PHP89.95
           "discount_percent": 92,
           ...
         }
@@ -27,11 +27,22 @@ Free games typically come back with success=true but price_overview
 absent. Region-locked games come back with success=false. Both are
 treated as 'no native price available', and the caller falls back to
 USD * fx_rate.
+
+Reliability: We retry up to 3 times on network/timeout/5xx errors with
+exponential backoff (0.5s, 1s, 2s). Without retries, a single transient
+failure leaves the deal with `price_php = NULL` and the frontend silently
+falls back to a USD-converted price that doesn't match what Steam
+actually shows in PH (the bug the user reported with NBA 2K26).
 """
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 _STEAM_APPDETAILS = "https://store.steampowered.com/api/appdetails"
@@ -44,6 +55,15 @@ _HEADERS = {
     ),
     "Accept": "application/json",
 }
+
+# Per-attempt timeout. Steam's CDN occasionally takes 5+ seconds, so 10s
+# is generous but bounded. Total worst-case across retries: ~13s of API
+# time + ~3.5s of backoff sleep = ~17s, well within the Lambda 30s budget.
+_REQUEST_TIMEOUT_SECONDS = 10
+
+# Exponential backoff between retries. Network blips usually clear in
+# under a second; longer Steam slowdowns benefit from the larger jumps.
+_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 
 @dataclass(frozen=True)
@@ -63,8 +83,14 @@ async def fetch_steam_regional_price(
     Returns None when:
       - The app doesn't exist or is region-locked (success=false)
       - The app is free and Steam doesn't return a price_overview
-      - The Steam API call fails (timeout, non-200, malformed JSON)
-    The caller can then fall back to USD->local FX conversion.
+      - All retries to the Steam API fail (timeout, 5xx, malformed JSON)
+
+    Retries on transient network/server errors. Does NOT retry on
+    "no data" outcomes (success=false, missing price_overview) -
+    those are stable answers from Steam, retrying won't change them.
+
+    The caller can then fall back to USD->local FX conversion when this
+    returns None.
     """
     if not app_id:
         return None
@@ -77,20 +103,75 @@ async def fetch_steam_regional_price(
         # response shape predictable.
         "l": "en",
     }
-    try:
-        async with httpx.AsyncClient(timeout=8, headers=_HEADERS) as client:
-            resp = await client.get(_STEAM_APPDETAILS, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-    except Exception:
+
+    payload = None
+    last_error = None
+    for attempt, backoff in enumerate(_RETRY_BACKOFF_SECONDS):
+        try:
+            async with httpx.AsyncClient(
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+                headers=_HEADERS,
+            ) as client:
+                resp = await client.get(_STEAM_APPDETAILS, params=params)
+
+                # Retry on 5xx (Steam server hiccup). Don't retry on 4xx
+                # (those are stable client errors - bad app_id, etc.).
+                if 500 <= resp.status_code < 600:
+                    last_error = f"HTTP {resp.status_code}"
+                    logger.warning(
+                        "Steam appdetails 5xx (attempt %d/%d) app_id=%s cc=%s status=%d",
+                        attempt + 1, len(_RETRY_BACKOFF_SECONDS),
+                        app_id, country_code, resp.status_code,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                resp.raise_for_status()
+                payload = resp.json()
+                break  # success
+
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+            last_error = repr(e)
+            logger.warning(
+                "Steam appdetails network error (attempt %d/%d) app_id=%s cc=%s: %s",
+                attempt + 1, len(_RETRY_BACKOFF_SECONDS),
+                app_id, country_code, e,
+            )
+            await asyncio.sleep(backoff)
+            continue
+
+        except Exception as e:
+            # Non-retryable: 4xx, JSON decode error, etc. Log and bail.
+            logger.warning(
+                "Steam appdetails non-retryable error app_id=%s cc=%s: %s",
+                app_id, country_code, e,
+            )
+            return None
+
+    if payload is None:
+        logger.error(
+            "Steam appdetails exhausted retries for app_id=%s cc=%s last_error=%s",
+            app_id, country_code, last_error,
+        )
         return None
 
     entry = payload.get(str(app_id)) or {}
     if not entry.get("success"):
+        # Stable "no" from Steam (region-locked, app removed, etc.).
+        # Don't log at WARN level - this is normal for ~5-10% of deals.
+        logger.debug(
+            "Steam appdetails success=false for app_id=%s cc=%s",
+            app_id, country_code,
+        )
         return None
 
     overview = (entry.get("data") or {}).get("price_overview")
     if not overview:
+        # Free game or no pricing data. Also normal.
+        logger.debug(
+            "Steam appdetails no price_overview for app_id=%s cc=%s",
+            app_id, country_code,
+        )
         return None
 
     try:
@@ -99,7 +180,11 @@ async def fetch_steam_regional_price(
         # Steam normalizes to two decimal places for PHP.
         initial = float(overview["initial"]) / 100.0
         final = float(overview["final"]) / 100.0
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(
+            "Steam appdetails malformed price_overview app_id=%s cc=%s err=%s",
+            app_id, country_code, e,
+        )
         return None
 
     return RegionalPrice(

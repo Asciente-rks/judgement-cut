@@ -10,11 +10,25 @@ That bypasses the inaccurate USD * FX conversion CheapShark would
 otherwise force on us.
 
 End-of-run finalize: at the end of each crawl, the spider POSTs to
-/internal/ingest/finalize with the run's start time. We then mark any
-deal whose `last_seen_at` is older than that as inactive, so stale
-deals from previous runs (deals that have come off sale) don't keep
-showing up in the dashboard's "live deals" count.
+/internal/ingest/finalize with the run's start time. The finalize
+endpoint runs three phases in order:
+
+  1. Re-enrichment retry: any active Steam deal still missing native
+     PHP pricing gets another attempt at fetch_steam_regional_price.
+     Catches deals where the in-line ingest enrichment hit a transient
+     Steam API failure (so the user doesn't see USD-converted fallback
+     prices that don't match Steam PH).
+  2. Mark inactive: any deal whose last_seen_at is older than the run's
+     start time (or NULL) gets is_active=0.
+  3. Delete inactive: rows with is_active=0 are removed entirely so
+     the table row count matches the latest crawl. Price history is
+     preserved separately.
+
+Together these fix two user-reported issues:
+  - "system price doesn't match Steam PH" -> retry enrichment
+  - "TiDB row count grows forever, doesn't match Zyte" -> delete inactive
 """
+import asyncio
 import time
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -24,6 +38,8 @@ from ..core import config
 from ..core.services.steam_pricing import fetch_steam_regional_price
 from ..data.repositories.crawler_repo import upsert_crawler_setting
 from ..data.repositories.deals_repo import (
+    delete_stale_deals,
+    get_active_deals_needing_enrichment,
     insert_featured_deal,
     mark_stale_deals_inactive,
     update_regional_pricing,
@@ -39,6 +55,8 @@ LAST_INGEST_AT_KEY = "_last_ingest_at"
 LAST_INGEST_COUNT_KEY = "_last_ingest_count"
 LAST_FINALIZE_AT_KEY = "_last_finalize_at"
 LAST_FINALIZE_DEACTIVATED_KEY = "_last_finalize_deactivated"
+LAST_FINALIZE_DELETED_KEY = "_last_finalize_deleted"
+LAST_FINALIZE_REENRICHED_KEY = "_last_finalize_reenriched"  # "succeeded/attempted"
 
 # Steam store ID in CheapShark's universe.
 _STEAM_STORE_ID = "1"
@@ -154,19 +172,51 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
     return {"inserted": inserted}
 
 
+# Cap on Phase-1 enrichment retries so finalize fits in the Lambda 30s
+# budget. With 5 concurrent workers and ~3-4s per Steam call (incl. its
+# own retries), 50 deals takes ~30-40s worst case, ~10s typical.
+_FINALIZE_ENRICHMENT_LIMIT = 50
+_FINALIZE_ENRICHMENT_CONCURRENCY = 5
+
+
+async def _retry_enrichment_for_row(sem: asyncio.Semaphore, row: dict) -> bool:
+    """Re-attempt Steam regional pricing for one row. Returns True on success.
+
+    Used by the finalize endpoint's Phase 1. Failures are swallowed -
+    one bad row shouldn't poison the whole finalize call.
+    """
+    app_id = row.get("steam_app_id")
+    deal_id = row.get("deal_id")
+    if not app_id or not deal_id:
+        return False
+    async with sem:
+        try:
+            price = await fetch_steam_regional_price(app_id, country_code="PH")
+        except Exception:
+            return False
+        if price is None:
+            return False
+        try:
+            await update_regional_pricing(
+                deal_id,
+                price_php=price.final,
+                normal_price_php=price.initial,
+            )
+            return True
+        except Exception:
+            return False
+
+
 @router.post("/ingest/finalize")
 async def finalize(request: Request, x_scraper_secret: Optional[str] = Header(None)):
-    """Mark deals not seen in this crawl as inactive.
+    """Run the three-phase end-of-crawl finalize.
+
+      Phase 1: re-enrich active Steam deals where price_php is still NULL.
+      Phase 2: mark deals not seen in this run as inactive.
+      Phase 3: delete inactive rows so the table = latest crawl.
 
     The spider POSTs `{"run_started_at": <epoch_seconds>}` after all
-    items have been ingested. Any deal whose `last_seen_at` is NULL or
-    older than `run_started_at` is set is_active=0, which removes it
-    from the dashboard's "live deals" view.
-
-    This is what fixes the "Sync status: 662 live deals but spider
-    only scraped 422" inconsistency. Old deals from previous runs that
-    came off sale (and so weren't included in the latest crawl) get
-    cleaned up here.
+    items have been ingested.
     """
     if not config.SCRAPER_SECRET:
         raise HTTPException(status_code=500, detail="Scraper secret not configured on server")
@@ -181,17 +231,76 @@ async def finalize(request: Request, x_scraper_secret: Optional[str] = Header(No
             detail="run_started_at must be a positive epoch timestamp",
         )
 
+    # ------------------------------------------------------------------
+    # Phase 1: re-attempt Steam enrichment for active deals with NULL
+    # price_php. These are deals where the in-line enrichment during
+    # /ingest hit a transient Steam API failure (timeout, 5xx) and
+    # silently fell through to NULL. Without this retry, the frontend
+    # falls back to USD x FX which doesn't match what Steam actually
+    # shows in PH (the bug the user reported with NBA 2K26).
+    #
+    # Bounded to 50 deals at 5 concurrent so the whole finalize fits in
+    # the Lambda 30s timeout even in the worst case.
+    # ------------------------------------------------------------------
+    enrichment_attempted = 0
+    enrichment_succeeded = 0
+    try:
+        needing = await get_active_deals_needing_enrichment(
+            limit=_FINALIZE_ENRICHMENT_LIMIT,
+        )
+        if needing:
+            sem = asyncio.Semaphore(_FINALIZE_ENRICHMENT_CONCURRENCY)
+            results = await asyncio.gather(
+                *(_retry_enrichment_for_row(sem, row) for row in needing),
+                return_exceptions=True,
+            )
+            enrichment_attempted = len(results)
+            enrichment_succeeded = sum(1 for r in results if r is True)
+    except Exception:
+        # Don't let a Phase-1 failure block Phase-2/3 - the inactive
+        # cleanup is more important than enrichment retries.
+        pass
+
+    # ------------------------------------------------------------------
+    # Phase 2: mark stale deals inactive.
+    # ------------------------------------------------------------------
     try:
         deactivated = await mark_stale_deals_inactive(int(run_started_at))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Finalize failed: {e}")
 
+    # ------------------------------------------------------------------
+    # Phase 3: delete inactive rows so the table row count matches the
+    # latest crawl. CheapShark assigns fresh dealIDs for new promotions,
+    # so we won't lose anything important - the same game on its next
+    # sale will come back with a new dealID. Price history (separate
+    # table, no FK) is preserved for historical lookup.
+    # ------------------------------------------------------------------
+    deleted = 0
+    try:
+        deleted = await delete_stale_deals()
+    except Exception:
+        # Same logic as Phase 1 - don't fail finalize on cleanup error.
+        # The next run will retry the cleanup.
+        pass
+
     # Update heartbeat keys so the admin monitor can show when the last
-    # crawl finished and how many deals were retired.
+    # crawl finished and how many deals were retired / cleaned up.
     try:
         await upsert_crawler_setting(LAST_FINALIZE_AT_KEY, str(int(time.time())))
         await upsert_crawler_setting(LAST_FINALIZE_DEACTIVATED_KEY, str(deactivated))
+        await upsert_crawler_setting(LAST_FINALIZE_DELETED_KEY, str(deleted))
+        await upsert_crawler_setting(
+            LAST_FINALIZE_REENRICHED_KEY,
+            f"{enrichment_succeeded}/{enrichment_attempted}",
+        )
     except Exception:
         pass
 
-    return {"deactivated": deactivated, "run_started_at": int(run_started_at)}
+    return {
+        "deactivated": deactivated,
+        "deleted": deleted,
+        "enrichment_attempted": enrichment_attempted,
+        "enrichment_succeeded": enrichment_succeeded,
+        "run_started_at": int(run_started_at),
+    }

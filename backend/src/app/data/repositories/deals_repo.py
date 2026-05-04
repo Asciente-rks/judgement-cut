@@ -14,7 +14,7 @@ Active vs stale deals:
   every deal ever seen.
 """
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 
@@ -184,3 +184,57 @@ async def mark_stale_deals_inactive(run_started_at_epoch: int) -> int:
         .values(is_active=False)
     )
     return await database.execute(query)
+
+
+async def delete_stale_deals() -> int:
+    """Delete inactive featured_deals rows.
+
+    Called by /internal/ingest/finalize after marking stale deals
+    inactive. Removes rows representing deals that came off sale, so the
+    table's row count matches the latest crawl (matching what shows up
+    in /v1/deals/featured and on Zyte's run summary).
+
+    Price history (separate table, no FK) is preserved so historical
+    lookups keep working - users just won't see those expired deals on
+    the dashboard. CheapShark assigns a fresh dealID for each new
+    promotion, so re-deleting the same game's old dealID and re-adding
+    a new one is the normal lifecycle.
+
+    Returns the number of rows deleted.
+    """
+    query = featured_deals.delete().where(
+        featured_deals.c.is_active == False  # noqa: E712
+    )
+    return await database.execute(query)
+
+
+async def get_active_deals_needing_enrichment(
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Find active Steam deals where regional pricing wasn't fetched.
+
+    These are deals where the main /ingest pass failed to resolve a
+    native PHP price (Steam API timeout / 5xx / transient failure).
+    The frontend silently falls back to USD-converted prices for these,
+    which is what gave the user the wrong NBA 2K26 price (USD x FX
+    instead of Steam's native PHP price).
+
+    /internal/ingest/finalize calls this at end of crawl and retries
+    the Steam regional API for each row, with the more aggressive retry
+    logic in steam_pricing.fetch_steam_regional_price.
+
+    Limit is conservative (50) so the finalize call comfortably fits
+    inside the Lambda 30s budget - 50 deals at ~5 concurrent = ~10s.
+    """
+    query = (
+        featured_deals.select()
+        .where(
+            (featured_deals.c.is_active == True)  # noqa: E712
+            & (featured_deals.c.store_id == "1")  # Steam store ID in CheapShark
+            & (featured_deals.c.steam_app_id != None)  # noqa: E711
+            & (featured_deals.c.price_php == None)  # noqa: E711
+        )
+        .limit(limit)
+    )
+    rows = await database.fetch_all(query)
+    return [dict(r) for r in rows]
