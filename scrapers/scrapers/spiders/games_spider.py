@@ -21,6 +21,15 @@ class GamesSpider(scrapy.Spider):
         "humble": "11",
     }
 
+    # Epic's API ships an array of typed images per game. We pick the
+    # first one matching any of these (in order) for the thumbnail.
+    _EPIC_IMAGE_PRIORITY = (
+        "OfferImageWide",
+        "DieselStoreFrontWide",
+        "Thumbnail",
+        "OfferImageTall",
+    )
+
     def start_requests(self):
         # CheapShark sales per platform
         for store_name, store_id in self.CHEAPSHARK_STORES.items():
@@ -63,6 +72,9 @@ class GamesSpider(scrapy.Spider):
             item["price"] = self._to_float(deal.get("salePrice"))
             item["normal_price"] = self._to_float(deal.get("normalPrice"))
             item["deal_rating"] = self._to_float(deal.get("dealRating"))
+            # CheapShark already returns the cover-art URL on /deals; we
+            # just preserve it. No extra HTTP request needed.
+            item["thumbnail_url"] = deal.get("thumb") or None
             if deal_id:
                 item["url"] = f"https://www.cheapshark.com/redirect?dealID={deal_id}"
             else:
@@ -110,8 +122,28 @@ class GamesSpider(scrapy.Spider):
             item["normal_price"] = normal_price
             item["deal_rating"] = None
             item["url"] = url
+            # Epic ships a typed image array; pick a wide cover if available.
+            item["thumbnail_url"] = self._pick_epic_image(game.get("keyImages"))
             item["scraped_at"] = datetime.utcnow().isoformat()
             yield item
+
+    @classmethod
+    def _pick_epic_image(cls, key_images):
+        if not isinstance(key_images, list):
+            return None
+        by_type = {}
+        for img in key_images:
+            if not isinstance(img, dict):
+                continue
+            t = img.get("type")
+            url = img.get("url")
+            if t and url:
+                by_type[t] = url
+        for preferred in cls._EPIC_IMAGE_PRIORITY:
+            if preferred in by_type:
+                return by_type[preferred]
+        # No preferred type found - return whatever's there, if anything.
+        return next(iter(by_type.values()), None)
 
     @staticmethod
     def _to_float(value):
