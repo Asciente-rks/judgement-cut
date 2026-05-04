@@ -46,7 +46,7 @@ Internal endpoints (for scrapers)
 
 Lambda handler notes:
 
-- The Lambda function should use Python 3.11 runtime and have the handler set to `backend.src.handler.handler`.
+- The Lambda function should use Python 3.11 runtime and have the handler set to `handler.handler`.
 
 Secrets and env vars (required/optional):
 

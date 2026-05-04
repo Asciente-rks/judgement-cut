@@ -19,8 +19,7 @@ jobs:
           pip install -r backend/requirements.txt -t backend/package
       - name: Copy source
         run: |
-          mkdir -p backend/package/backend
-          cp -r backend/src backend/package/backend/
+          cp -r backend/src/* backend/package/
       - name: Zip
         run: |
           cd backend/package
@@ -46,7 +45,7 @@ jobs:
             aws lambda update-function-configuration \
               --function-name "$FUNCTION_NAME" \
               --runtime python3.11 \
-              --handler backend.src.handler.handler \
+              --handler handler.handler \
               --timeout 30 \
               --memory-size 256 >/dev/null
           else
@@ -59,7 +58,7 @@ jobs:
               --function-name "$FUNCTION_NAME" \
               --runtime python3.11 \
               --role "$ROLE_ARN" \
-              --handler backend.src.handler.handler \
+              --handler handler.handler \
               --zip-file fileb://backend/function.zip \
               --timeout 30 \
               --memory-size 256 >/dev/null 2>&1
