@@ -69,19 +69,15 @@ jobs:
           CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
           printf '%s' "$CORS_JSON" > "$CORS_FILE"
 
-          if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
-            aws lambda update-function-url-config \
-              --function-name "$FUNCTION_NAME" \
-              --auth-type NONE \
-              --cors file://"$CORS_FILE" \
-              --query 'FunctionUrl' --output text
-          else
-            aws lambda create-function-url-config \
-              --function-name "$FUNCTION_NAME" \
-              --auth-type NONE \
-              --cors file://"$CORS_FILE" \
-              --query 'FunctionUrl' --output text
-          fi
+          # Recreate Function URL config to avoid stale auth state
+          aws lambda delete-function-url-config \
+            --function-name "$FUNCTION_NAME" >/dev/null 2>&1 || true
+
+          aws lambda create-function-url-config \
+            --function-name "$FUNCTION_NAME" \
+            --auth-type NONE \
+            --cors file://"$CORS_FILE" \
+            --query 'FunctionUrl' --output text
 
           rm -f "$CORS_FILE"
 
