@@ -42,8 +42,13 @@ class GamesSpider(scrapy.Spider):
             yield scrapy.Request(
                 url,
                 callback=self.parse_cheapshark,
+                errback=self.errback_cheapshark,
                 cb_kwargs={"store_name": store_name, "store_id": store_id},
                 headers={"Accept": "application/json"},
+                # Don't let middlewares filter this on duplicate URL or
+                # cache - we always want a live hit so the diagnostic
+                # logs reflect the current state.
+                dont_filter=True,
             )
 
         # Epic free games (official store feed)
@@ -51,6 +56,19 @@ class GamesSpider(scrapy.Spider):
             self.EPIC_FREE,
             callback=self.parse_epic_free,
             headers={"Accept": "application/json"},
+        )
+
+    def errback_cheapshark(self, failure):
+        """Surface network-level failures (DNS, TCP, TLS) that wouldn't
+        produce a Response object at all. Without this, the spider just
+        finishes silently with no clue what happened."""
+        request = failure.request
+        store = request.cb_kwargs.get("store_name", "?")
+        self.logger.error(
+            "CheapShark request failed for store=%s url=%s reason=%s",
+            store,
+            request.url,
+            repr(failure.value),
         )
 
     def parse_cheapshark(self, response, store_name, store_id):

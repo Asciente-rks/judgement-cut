@@ -20,6 +20,12 @@ USER_AGENT = (
     '+https://github.com/Asciente-rks/judgement-cut)'
 )
 
+# Let our parse callbacks see every response - including 4xx/5xx -
+# instead of HttpErrorMiddleware silently dropping them. We need this
+# to diagnose why CheapShark returns nothing for some stores; the
+# parser logs status/length/content-type for every hit.
+HTTPERROR_ALLOW_ALL = True
+
 # Encoding for feed exports
 FEED_EXPORT_ENCODING = 'utf-8'
 
