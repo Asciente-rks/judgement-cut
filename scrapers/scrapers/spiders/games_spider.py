@@ -15,19 +15,16 @@ class GamesSpider(scrapy.Spider):
         "?locale=en-US&country=US&allowCountries=US"
     )
 
+    # CheapShark caps pageSize at 60 per request. We paginate per-store
+    # because the user shops mostly on Steam, so Steam gets a much
+    # deeper crawl while GOG / Humble stay shallow. Total ~428 deals
+    # per run × once-daily schedule = ~12.8k Lambda invocations/month,
+    # comfortably under the free-tier 1M cap.
     CHEAPSHARK_STORES = {
-        "steam": "1",
-        "gog": "7",
-        "humble": "11",
+        "steam": {"id": "1", "pages": 5},   # 300 deals/day, deep coverage
+        "gog": {"id": "7", "pages": 1},     # 60 deals/day, top deals only
+        "humble": {"id": "11", "pages": 1}, # 60 deals/day, top deals only
     }
-
-    # CheapShark caps pageSize at 60. To show more than 60 deals per
-    # store on the dashboard we paginate. 2 pages = up to 120 deals
-    # per store = ~368 total + Epic. Conservative choice that gives
-    # the dashboard real depth without quadrupling Lambda invocations.
-    # Bump to 3+ when scaling matters; CheapShark's pagination is
-    # cheap on their side too.
-    CHEAPSHARK_PAGES = 2
 
     # Epic's API ships an array of typed images per game. We pick the
     # first one matching any of these (in order) for the thumbnail.
@@ -41,8 +38,10 @@ class GamesSpider(scrapy.Spider):
     def start_requests(self):
         # CheapShark sales per platform, paginated. CheapShark uses
         # 0-indexed pageNumber and a cap of 60 results per page.
-        for store_name, store_id in self.CHEAPSHARK_STORES.items():
-            for page_num in range(self.CHEAPSHARK_PAGES):
+        for store_name, cfg in self.CHEAPSHARK_STORES.items():
+            store_id = cfg["id"]
+            pages = cfg["pages"]
+            for page_num in range(pages):
                 params = {
                     "storeID": store_id,
                     "pageSize": 60,
