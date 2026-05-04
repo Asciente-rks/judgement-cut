@@ -123,6 +123,10 @@ class GamesSpider(scrapy.Spider):
             # CheapShark already returns the cover-art URL on /deals; we
             # just preserve it. No extra HTTP request needed.
             item["thumbnail_url"] = deal.get("thumb") or None
+            # CheapShark also returns `steamAppID` for Steam deals -
+            # the backend uses this to fetch native PHP pricing from
+            # store.steampowered.com instead of guessing via USD->PHP FX.
+            item["steam_app_id"] = deal.get("steamAppID") or None
             if deal_id:
                 item["url"] = f"https://www.cheapshark.com/redirect?dealID={deal_id}"
             else:

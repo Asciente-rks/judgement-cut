@@ -12,4 +12,8 @@ class DealItem(scrapy.Item):
     # CheapShark / Epic provide a thumbnail URL in their existing API
     # response. We just forward it - no extra scraping or HTML parsing.
     thumbnail_url = scrapy.Field()
+    # Steam's app ID for Steam deals (CheapShark `steamAppID`). The
+    # backend uses it to call store.steampowered.com for native regional
+    # PHP pricing instead of naive USD->PHP conversion.
+    steam_app_id = scrapy.Field()
     scraped_at = scrapy.Field()
