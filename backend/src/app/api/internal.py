@@ -3,14 +3,24 @@
 Gated by the X-Scraper-Secret header. The spider POSTs deal items here;
 the admin monitor reads back a heartbeat so we can tell from the UI
 whether the spider is reaching us.
+
+For Steam deals (store_id == "1") we also enrich with Steam's native
+regional pricing (PHP) via store.steampowered.com/api/appdetails.
+That bypasses the inaccurate USD * FX conversion CheapShark would
+otherwise force on us.
 """
 import time
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from typing import Optional
 
 from ..core import config
+from ..core.services.steam_pricing import fetch_steam_regional_price
 from ..data.repositories.crawler_repo import upsert_crawler_setting
-from ..data.repositories.deals_repo import insert_featured_deal
+from ..data.repositories.deals_repo import (
+    insert_featured_deal,
+    update_regional_pricing,
+)
 from ..data.repositories.price_history_repo import insert_price_record
 
 router = APIRouter()
@@ -21,6 +31,9 @@ router = APIRouter()
 LAST_INGEST_AT_KEY = "_last_ingest_at"
 LAST_INGEST_COUNT_KEY = "_last_ingest_count"
 
+# Steam store ID in CheapShark's universe.
+_STEAM_STORE_ID = "1"
+
 
 def _normalize_thumbnail(value):
     """The CheapShark `thumb` field is a URL string. Reject anything else."""
@@ -28,6 +41,39 @@ def _normalize_thumbnail(value):
         return None
     value = value.strip()
     return value if value.startswith("http") else None
+
+
+def _normalize_steam_app_id(value):
+    """CheapShark `steamAppID` is a numeric string. Anything non-digit -> None."""
+    if value in (None, "", 0):
+        return None
+    s = str(value).strip()
+    return s if s.isdigit() else None
+
+
+async def _enrich_steam_pricing(deal_id: str, app_id: str) -> None:
+    """Fetch native PHP pricing from Steam and persist on the deal.
+
+    Failures are swallowed: if Steam is unreachable / returns no
+    price_overview / the app is region-locked, we leave price_php=NULL
+    and the frontend falls back to USD * FX. This is intentionally
+    fire-and-forget at the call site - we don't want spider POSTs to
+    block on a slow Steam API.
+    """
+    try:
+        price = await fetch_steam_regional_price(app_id, country_code="PH")
+    except Exception:
+        return
+    if price is None:
+        return
+    try:
+        await update_regional_pricing(
+            deal_id,
+            price_php=price.final,
+            normal_price_php=price.initial,
+        )
+    except Exception:
+        return
 
 
 @router.post("/ingest")
@@ -45,8 +91,9 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
     inserted = 0
     for it in items:
         # Map fields expected by featured_deals table. The spider sends
-        # `thumbnail_url` (CheapShark's `thumb`); the bare CheapShark
-        # response uses `thumb`; tolerate both for forwards-compat.
+        # `thumbnail_url` (CheapShark's `thumb`) and `steam_app_id`
+        # (CheapShark's `steamAppID`); the bare CheapShark response uses
+        # `thumb` / `steamAppID`; tolerate both for forwards-compat.
         deal = {
             "deal_id": it.get("deal_id") or it.get("dealID") or it.get("id"),
             "title": it.get("title"),
@@ -56,6 +103,9 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
             "deal_rating": float(it.get("deal_rating") or 0.0),
             "thumbnail_url": _normalize_thumbnail(
                 it.get("thumbnail_url") or it.get("thumb") or it.get("thumbnail")
+            ),
+            "steam_app_id": _normalize_steam_app_id(
+                it.get("steam_app_id") or it.get("steamAppID")
             ),
         }
         try:
@@ -67,9 +117,17 @@ async def ingest(request: Request, x_scraper_secret: Optional[str] = Header(None
             # continue on errors to be robust
             continue
 
+        # Steam-only enrichment with native PHP pricing. Synchronous so
+        # that by the time /v1/deals/featured returns, the row has the
+        # accurate price. ~200-400ms per Steam deal; spider has 10s
+        # timeout per POST so we're well within budget.
+        if (deal.get("store_id") == _STEAM_STORE_ID
+                and deal.get("steam_app_id")
+                and deal.get("deal_id")):
+            await _enrich_steam_pricing(deal["deal_id"], deal["steam_app_id"])
+
     # Heartbeat: record when the spider last reached us and how much it
-    # delivered. The admin monitor surfaces this so the operator can tell
-    # at a glance whether the pipeline is alive.
+    # delivered.
     try:
         now_iso = str(int(time.time()))
         await upsert_crawler_setting(LAST_INGEST_AT_KEY, now_iso)

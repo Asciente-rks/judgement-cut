@@ -31,16 +31,27 @@ featured_deals = Table(
     "featured_deals",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("deal_id", String(100), nullable=False),
+    # deal_id is unique - the spider re-ingests the same deals daily, and
+    # we want UPSERT semantics so the table doesn't grow unbounded.
+    Column("deal_id", String(100), nullable=False, unique=True),
     Column("title", String(300)),
     Column("store_id", String(50)),
+    # USD prices straight from CheapShark.
     Column("price", Float),
     Column("normal_price", Float),
     Column("deal_rating", Float, default=0.0),
-    # Original CheapShark CDN URL for the game's cover art. Mirrored to R2
-    # on first request via /v1/deals/{id}/thumbnail and served as a
-    # presigned R2 URL after that.
+    # CheapShark CDN URL for the cover art. Mirrored to R2 lazily on
+    # /v1/deals/{id}/thumbnail.
     Column("thumbnail_url", String(500), nullable=True),
+    # For Steam deals, the underlying Steam app ID. Lets us call
+    # store.steampowered.com/api/appdetails?cc=PH for native PHP pricing
+    # rather than naive USD->PHP currency conversion.
+    Column("steam_app_id", String(50), nullable=True),
+    # Native regional pricing populated from Steam's API. NULL means the
+    # client should fall back to USD * fx_rate.
+    Column("price_php", Float, nullable=True),
+    Column("normal_price_php", Float, nullable=True),
+    Column("regional_price_at", DateTime, nullable=True),
     Column("synced_at", DateTime, default=datetime.utcnow),
 )
 
@@ -84,11 +95,30 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Cold starts re-run it; warm invocations skip the round trip to TiDB.
 _SCHEMA_BOOTSTRAPPED = False
 
-# One-shot ALTER statements for columns that metadata.create_all() can't
-# add to existing tables. Each entry is idempotent: a duplicate-column
-# error from MySQL means the migration already ran on this database.
+# One-shot ALTER statements that metadata.create_all() can't add to
+# existing tables. Each is idempotent: a duplicate-column / duplicate-
+# index error from MySQL means the migration already ran on this DB.
 _MIGRATIONS = [
+    # Original thumbnail mirror column.
     "ALTER TABLE featured_deals ADD COLUMN thumbnail_url VARCHAR(500) NULL",
+    # Steam app ID + native regional pricing.
+    "ALTER TABLE featured_deals ADD COLUMN steam_app_id VARCHAR(50) NULL",
+    "ALTER TABLE featured_deals ADD COLUMN price_php DOUBLE NULL",
+    "ALTER TABLE featured_deals ADD COLUMN normal_price_php DOUBLE NULL",
+    "ALTER TABLE featured_deals ADD COLUMN regional_price_at DATETIME NULL",
+    # Dedup the table: if the spider posts the same deal_id twice, we
+    # want UPSERT semantics, not a duplicate row. The repository layer
+    # uses INSERT ... ON DUPLICATE KEY UPDATE which requires this index.
+    # On TiDB / MySQL, adding a UNIQUE constraint will fail if the
+    # existing data has duplicates; we de-dupe first.
+    (
+        "DELETE FROM featured_deals WHERE id NOT IN ("
+        "  SELECT id FROM ("
+        "    SELECT MIN(id) AS id FROM featured_deals GROUP BY deal_id"
+        "  ) t"
+        ")"
+    ),
+    "CREATE UNIQUE INDEX idx_featured_deals_deal_id ON featured_deals (deal_id)",
 ]
 
 
