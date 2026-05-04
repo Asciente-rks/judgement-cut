@@ -1,0 +1,76 @@
+name: Deploy Spider to Zyte
+
+# Auto-redeploys the Scrapy spider to Zyte (Scrapinghub Cloud) whenever
+# anything under scrapers/ changes on main, plus a manual trigger
+# (workflow_dispatch) for force-redeploys.
+#
+# Requires GitHub Secret SHUB_API_KEY:
+#   1. Get the API key from https://app.zyte.com/o/<org_id>/account/apikey
+#      (or click your avatar → API key)
+#   2. In this repo: Settings → Secrets and variables → Actions →
+#      New repository secret → Name: SHUB_API_KEY, Value: <paste>
+#
+# Project ID is taken from scrapers/scrapinghub.yml (currently 860207).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scrapers/**'
+      - '.github/workflows/deploy-spider.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install shub
+        run: pip install --upgrade shub
+
+      - name: Verify SHUB_API_KEY is set
+        env:
+          SHUB_API_KEY: ${{ secrets.SHUB_API_KEY }}
+        run: |
+          if [ -z "$SHUB_API_KEY" ]; then
+            echo "::error::SHUB_API_KEY repository secret is not set."
+            echo "::error::Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "SHUB_API_KEY is set (length: ${#SHUB_API_KEY})"
+
+      - name: Configure shub auth
+        env:
+          SHUB_API_KEY: ${{ secrets.SHUB_API_KEY }}
+        run: |
+          # shub reads the API key from ~/.scrapinghub.yml (legacy path)
+          # OR ~/.config/scrapinghub/scrapinghub.yml. Write the legacy
+          # path because it's what `shub login` historically wrote.
+          cat > "$HOME/.scrapinghub.yml" <<EOF
+          apikeys:
+            default: $SHUB_API_KEY
+          EOF
+          chmod 600 "$HOME/.scrapinghub.yml"
+
+      - name: Deploy to Zyte
+        working-directory: scrapers
+        run: |
+          # The project ID is in scrapers/scrapinghub.yml (currently 860207).
+          # `shub deploy` packages the egg, uploads it, and switches the
+          # spider to the new revision in one shot.
+          shub deploy
+
+      - name: Confirm deployed spiders
+        working-directory: scrapers
+        run: |
+          # Lists what's deployed so the run log shows you the version
+          # and which spiders are bound to it.
+          shub schedule --list || true
+          echo "Spider deployed successfully. Check run history at:"
+          echo "https://app.zyte.com/p/$(grep -E '^project:' scrapinghub.yml | awk '{print $2}')/jobs"
