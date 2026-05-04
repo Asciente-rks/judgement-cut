@@ -19,13 +19,27 @@ jobs:
           pip install -r backend/requirements.txt -t backend/package --no-cache-dir
       - name: Strip package to fit Lambda direct-upload size limit
         run: |
-          # boto3 / botocore / s3transfer ship in the Lambda Python 3.11 runtime,
-          # so we don't need to bundle them. Saves ~12 MB.
+          # === Drop deps already provided by the Lambda Python 3.11 runtime ===
+          # boto3 / botocore / s3transfer all ship in the runtime - bundling
+          # them just bloats the upload. Saves ~12 MB.
           rm -rf backend/package/boto3 backend/package/botocore backend/package/s3transfer
-          # Strip bytecode caches and test directories - never needed at runtime.
+
+          # === Drop server-only deps (Mangum is the ASGI adapter on Lambda) ===
+          # Verified: handler.py imports `mangum` only; nothing in the
+          # runtime path imports uvicorn. uvicorn and its transitive native
+          # deps (uvloop ~3 MB, httptools, websockets, watchfiles) are pure
+          # dead weight in Lambda. Saves ~5-6 MB.
+          rm -rf backend/package/uvicorn
+          rm -rf backend/package/uvloop
+          rm -rf backend/package/httptools
+          rm -rf backend/package/websockets
+          rm -rf backend/package/watchfiles
+
+          # === Bytecode caches, type stubs, tests, docs, examples ===
           find backend/package -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-          find backend/package -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
-          find backend/package -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+          find backend/package -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.pyi" \) -delete
+          find backend/package -type d \( -name "tests" -o -name "test" -o -name "docs" -o -name "examples" \) -exec rm -rf {} + 2>/dev/null || true
+
           echo "Package size after strip:"
           du -sh backend/package
       - name: Copy source
