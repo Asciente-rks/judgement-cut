@@ -93,6 +93,17 @@ jobs:
             --principal '*' \
             --function-url-auth-type NONE >/dev/null 2>&1 || true
 
+          aws lambda remove-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id AllowPublicInvokeFunction >/dev/null 2>&1 || true
+
+          aws lambda add-permission \
+            --function-name "$FUNCTION_NAME" \
+            --statement-id AllowPublicInvokeFunction \
+            --action lambda:InvokeFunction \
+            --principal '*' \
+            --invoked-via-function-url >/dev/null 2>&1 || true
+
           echo "Function URL config:"
           aws lambda get-function-url-config \
             --function-name "$FUNCTION_NAME" \
