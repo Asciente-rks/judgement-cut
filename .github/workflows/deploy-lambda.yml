@@ -41,13 +41,13 @@ jobs:
           # Check if Lambda function exists (suppress stdout/stderr to avoid leaking env variables)
           if aws lambda get-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             echo "Lambda function exists, updating code..."
-            aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://backend/function.zip >/dev/null 2>&1
+            aws lambda update-function-code --function-name "$FUNCTION_NAME" --zip-file fileb://backend/function.zip
             aws lambda update-function-configuration \
               --function-name "$FUNCTION_NAME" \
               --runtime python3.11 \
               --handler backend.src.handler.handler \
               --timeout 30 \
-              --memory-size 256 >/dev/null 2>&1
+              --memory-size 256
           else
             echo "Lambda function does not exist, creating..."
             if [ -z "$ROLE_ARN" ]; then
