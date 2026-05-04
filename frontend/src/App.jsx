@@ -617,10 +617,12 @@ function DashboardView({
   );
 }
 
-// Default visible per section. Cards beyond this stay hidden until the
-// user clicks "Show all". Fits ~3 rows of 4 cards on desktop / 6 rows
-// of 2 on mobile - dense enough to feel populated without overwhelming.
-const DEFAULT_VISIBLE = 12;
+// Per-page cap. 24 = 6 rows × 4 columns on desktop, dense enough to
+// feel populated without overwhelming on slower devices. The user
+// asked for "60 per page" but with ~120 deals per store that's only
+// 2 pages; 24 gives more pagination granularity without making any
+// single page too long to scroll.
+const ITEMS_PER_PAGE = 24;
 
 function PlatformSection({
   platform,
@@ -632,9 +634,18 @@ function PlatformSection({
   onOpenHistory,
   loading,
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const visible = expanded ? items : items.slice(0, DEFAULT_VISIBLE);
-  const hiddenCount = Math.max(0, items.length - DEFAULT_VISIBLE);
+  const [page, setPage] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(items.length / ITEMS_PER_PAGE));
+  const safePage = Math.min(page, totalPages - 1);
+  const startIdx = safePage * ITEMS_PER_PAGE;
+  const visible = items.slice(startIdx, startIdx + ITEMS_PER_PAGE);
+
+  // Reset paging back to page 0 when the dataset changes (e.g. a new
+  // spider run loads a different number of deals into this platform).
+  useEffect(() => {
+    if (page >= totalPages) setPage(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
 
   return (
     <div className="glass-card rounded-3xl p-6 md:p-8">
@@ -669,15 +680,25 @@ function PlatformSection({
         ))}
       </div>
 
-      {hiddenCount > 0 ? (
-        <div className="mt-6 flex justify-center">
+      {totalPages > 1 ? (
+        <div className="mt-6 flex items-center justify-center gap-3 text-sm">
           <button
-            onClick={() => setExpanded((v) => !v)}
-            className="rounded-full border border-white/20 px-5 py-2 text-sm text-slate-100/80 transition hover:border-sky-300/50 hover:text-white"
+            onClick={() => setPage(Math.max(0, safePage - 1))}
+            disabled={safePage === 0}
+            className="rounded-full border border-white/20 px-4 py-1.5 text-slate-100/80 transition hover:border-sky-300/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
           >
-            {expanded
-              ? `Collapse (showing ${items.length})`
-              : `Show all ${items.length}`}
+            ← Prev
+          </button>
+          <span className="text-slate-200/70">
+            Showing {startIdx + 1}–{Math.min(startIdx + ITEMS_PER_PAGE, items.length)} of{" "}
+            {items.length} · Page {safePage + 1} / {totalPages}
+          </span>
+          <button
+            onClick={() => setPage(Math.min(totalPages - 1, safePage + 1))}
+            disabled={safePage === totalPages - 1}
+            className="rounded-full border border-white/20 px-4 py-1.5 text-slate-100/80 transition hover:border-sky-300/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            Next →
           </button>
         </div>
       ) : null}
@@ -969,10 +990,16 @@ function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
                 <span className="text-emerald-200">All-time low:</span>{" "}
                 <span className="font-semibold">
                   {formatPrice(min.price, currency, fxRate)}
-                </span>{" "}
-                <span className="text-slate-200/60">
-                  on {new Date(min.recorded_at).toLocaleDateString()}
                 </span>
+                {min.recorded_at ? (
+                  <>
+                    {" "}
+                    <span className="text-slate-200/60">
+                      on{" "}
+                      {new Date(min.recorded_at).toLocaleDateString()}
+                    </span>
+                  </>
+                ) : null}
               </div>
             ) : null}
             <div className="max-h-72 overflow-y-auto rounded-xl border border-white/10">
@@ -990,7 +1017,9 @@ function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
                       className="border-t border-white/5 even:bg-slate-950/50"
                     >
                       <td className="px-4 py-2 text-slate-200/80">
-                        {new Date(row.recorded_at).toLocaleString()}
+                        {row.recorded_at
+                          ? new Date(row.recorded_at).toLocaleString()
+                          : "—"}
                       </td>
                       <td className="px-4 py-2 text-right font-semibold">
                         {formatPrice(row.price, currency, fxRate)}
