@@ -54,14 +54,44 @@ class GamesSpider(scrapy.Spider):
         )
 
     def parse_cheapshark(self, response, store_name, store_id):
+        # Diagnostic: log status, length and content-type so we can tell
+        # whether Zyte's IPs are hitting a 200-empty / 403 / HTML wall.
+        self.logger.info(
+            "CheapShark store=%s status=%s length=%d content-type=%s",
+            store_name,
+            response.status,
+            len(response.text),
+            response.headers.get(b"Content-Type", b"").decode("utf-8", "ignore"),
+        )
+
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError:
-            self.logger.warning("CheapShark response was not valid JSON")
+            # Show what we actually got so we can tell the difference
+            # between a CAPTCHA HTML page, a plaintext 'Access Denied',
+            # or a partial JSON.
+            self.logger.warning(
+                "CheapShark store=%s returned non-JSON. First 300 chars: %s",
+                store_name,
+                response.text[:300],
+            )
             return
 
         if not isinstance(data, list):
+            self.logger.warning(
+                "CheapShark store=%s returned non-list payload: %r",
+                store_name,
+                data,
+            )
             return
+
+        if not data:
+            self.logger.warning(
+                "CheapShark store=%s returned an empty array. The IP may "
+                "be rate-limited or the storeID may not be valid for this "
+                "region.",
+                store_name,
+            )
 
         for deal in data:
             item = DealItem()
