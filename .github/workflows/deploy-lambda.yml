@@ -20,59 +20,56 @@ jobs:
       - name: Strip package to fit Lambda direct-upload size limit
         run: |
           # === Drop entire package + its dist-info for unused deps ===
-          # Each entry takes both:
-          #   backend/package/<pkg>/             (the actual package)
-          #   backend/package/<pkg>-X.Y.Z.dist-info/  (pip metadata)
-          # Removing the package without its dist-info leaves a ~1 MB
-          # orphan dir behind, which is what bit us last time.
           drop_pkg() {
             local pkg="$1"
             rm -rf "backend/package/${pkg}"
-            # dist-info dirs use underscores for hyphens in some package
-            # names (e.g. python_dateutil-2.9.0.dist-info), so check both.
             rm -rf backend/package/${pkg}-*.dist-info 2>/dev/null || true
             rm -rf backend/package/${pkg//-/_}-*.dist-info 2>/dev/null || true
           }
 
-          # Already in the Lambda Python 3.11 runtime - shipping them is
-          # pure bloat (~12 MB). urllib3 + jmespath are boto3 satellites
-          # only, so they're orphaned once boto3/botocore are gone.
           for pkg in boto3 botocore s3transfer urllib3 jmespath; do
             drop_pkg "$pkg"
           done
-
-          # Server-only deps. handler.py uses Mangum to adapt ASGI to
-          # Lambda; uvicorn is for local dev only and never reached at
-          # runtime. uvloop / httptools / websockets / watchfiles only
-          # come in via uvicorn[standard] which isn't requested - the
-          # drop_pkg calls are harmless if those aren't present.
           for pkg in uvicorn uvloop httptools websockets watchfiles; do
             drop_pkg "$pkg"
           done
 
-          # === Drop unused SQLAlchemy dialects ===
-          # The app only uses MySQL (databases[mysql] / aiomysql / pymysql).
-          # Each unused dialect dir is ~0.5-1 MB. Saves ~3 MB total.
+          # === Drop unused SQLAlchemy dialects + extensions ===
           for d in postgresql mssql oracle sqlite sybase firebird; do
             rm -rf "backend/package/sqlalchemy/dialects/$d"
           done
           rm -rf backend/package/sqlalchemy/testing
+          rm -rf backend/package/sqlalchemy/ext/mypy
+          rm -rf backend/package/sqlalchemy/cyextension
 
-          # === Bytecode caches, type stubs, tests, docs, examples ===
+          # === Trim cryptography submodules not used for JWT auth ===
+          rm -rf backend/package/cryptography/x509
+          rm -rf backend/package/cryptography/hazmat/decrepit
+          rm -rf backend/package/cryptography/hazmat/primitives/twofactor
+          rm -f backend/package/cryptography/fernet.py
+
+          # === pydantic v1 compatibility shim (we're on pydantic 2) ===
+          rm -rf backend/package/pydantic/v1
+
+          # === Generic cleanup ===
           find backend/package -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
           find backend/package -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.pyi" \) -delete
           find backend/package -type d \( -name "tests" -o -name "test" -o -name "docs" -o -name "examples" -o -name "samples" \) -exec rm -rf {} + 2>/dev/null || true
-
-          # === Docs / license files inside package dirs (not the project root) ===
           find backend/package -type f \( -iname "README*" -o -iname "CHANGELOG*" -o -iname "CHANGES*" -o -iname "HISTORY*" -o -iname "AUTHORS*" -o -iname "NOTICE*" -o -iname "*.md" -o -iname "*.rst" \) -delete
 
-          # === dist-info chaff (keep METADATA for importlib.metadata; drop the rest) ===
-          # RECORD = file checksums; LICENSE/NOTICE = legal text; WHEEL =
-          # wheel-build metadata; INSTALLER/REQUESTED/top_level.txt =
-          # pip-internal markers. None of these are read at runtime.
-          for f in RECORD LICENSE LICENSE.txt NOTICE NOTICE.txt WHEEL INSTALLER REQUESTED top_level.txt; do
-            find backend/package -path "*.dist-info/$f" -delete 2>/dev/null || true
-          done
+          # === Pre-compile .py to .pyc with -OO and drop sources ===
+          # -OO strips asserts, __debug__ blocks, AND docstrings.
+          # -b writes .pyc alongside .py. Python imports .pyc when .py
+          # is missing (PEP 488). 25-35% smaller for pure-Python deps.
+          # Runs BEFORE 'Copy source' so app code is untouched.
+          python3 -OO -m compileall -b -q backend/package 2>/dev/null || true
+          find backend/package -type f -name "*.py" -delete
+          find backend/package -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+          # === dist-info: nuke entirely ===
+          # importlib.metadata fallbacks are graceful; nothing in this
+          # app's runtime path needs package metadata.
+          find backend/package -maxdepth 1 -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
 
           echo "Package size after strip:"
           du -sh backend/package
@@ -84,25 +81,18 @@ jobs:
       - name: Zip
         run: |
           cd backend/package
-          # -9 = maximum compression. ~1-3% smaller on Python wheels
-          # vs the default level 6. Worth a couple seconds of extra
-          # CPU when we're up against AWS's request-size cap.
-          zip -9qr ../function.zip .
+          # -9 = max compression, -X = strip Unix UID/GID extras
+          zip -9Xqr ../function.zip .
           cd ..
           echo "function.zip size:"
           ls -lh function.zip
       - name: Verify zip fits under direct-upload limit
         run: |
-          # Lambda's UpdateFunctionCode rejects requests > 70167211 bytes.
-          # The zip is base64-encoded in the request body (~33% inflation),
-          # so the raw zip must stay under ~52 MB. Fail fast with useful
-          # diagnostics instead of waiting for AWS to reject.
           ZIP_SIZE=$(stat -c%s backend/function.zip)
           LIMIT=52000000
           echo "function.zip raw size: $ZIP_SIZE bytes (limit: $LIMIT)"
           if [ "$ZIP_SIZE" -gt "$LIMIT" ]; then
             echo "ERROR: function.zip is too large for Lambda direct upload."
-            echo "Strip more from backend/package or move to S3 upload."
             exit 1
           fi
       - name: Configure AWS credentials
@@ -118,7 +108,6 @@ jobs:
         run: |
           set -e
 
-          # Check if Lambda function exists (suppress stdout/stderr to avoid leaking env variables)
           if aws lambda get-function --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             echo "Lambda function exists, updating code..."
             aws lambda update-function-code \
@@ -127,9 +116,6 @@ jobs:
             aws lambda wait function-updated --function-name "$FUNCTION_NAME"
 
             echo "Updating function configuration..."
-            # Retry update-function-configuration: occasionally Lambda still
-            # reports the function as updating right after the wait returns,
-            # producing a transient ResourceConflictException.
             for attempt in 1 2 3 4 5; do
               if aws lambda update-function-configuration \
                 --function-name "$FUNCTION_NAME" \
@@ -147,7 +133,6 @@ jobs:
                 aws lambda wait function-updated --function-name "$FUNCTION_NAME" || true
                 continue
               fi
-              # Different error - surface it and fail
               cat conf_err.log >&2
               exit 1
             done
@@ -179,9 +164,6 @@ jobs:
           CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
           printf '%s' "$CORS_JSON" > "$CORS_FILE"
 
-          # If a Function URL config already exists, update CORS in place.
-          # The URL itself is preserved across updates - only delete+create
-          # would change it, which is exactly what we want to avoid.
           if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
             echo "Function URL exists - updating CORS only (URL stays the same)."
             aws lambda update-function-url-config \
@@ -200,9 +182,6 @@ jobs:
 
           rm -f "$CORS_FILE"
 
-          # Idempotently ensure public invoke permission. add-permission returns
-          # ResourceConflictException if the statement already exists, which is
-          # benign - we only care that it ends up present.
           aws lambda add-permission \
             --function-name "$FUNCTION_NAME" \
             --statement-id AllowPublicInvokeFunctionUrl \
