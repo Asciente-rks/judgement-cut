@@ -1,5 +1,5 @@
 from typing import Any, Dict, List
-from ..core.services.cheapshark import fetch_deals as live_fetch
+from .cheapshark import fetch_deals as live_fetch
 from ..data.repositories.deals_repo import get_featured_deals
 from ..data.repositories.platforms_repo import get_enabled_platforms
 from ..data.repositories.price_history_repo import get_price_history_for_deal, insert_price_record
