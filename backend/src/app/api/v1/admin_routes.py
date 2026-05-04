@@ -76,12 +76,21 @@ async def monitor_scraper(_=Depends(require_admin)):
     status: dict = {}
 
     # 1. Upstream check. Pass storeID so CheapShark answers 200 (it
-    #    returns 400 on bare /deals without a filter).
+    #    returns 400 on bare /deals without a filter). Also send a
+    #    browser-like UA: Lambda's region was being filtered when we
+    #    hit it with httpx's default UA.
     try:
         r = httpx.get(
             "https://www.cheapshark.com/api/1.0/deals",
             params={"storeID": "1", "pageSize": 1},
             timeout=5,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; JudgementCut/1.0; "
+                    "+https://github.com/Asciente-rks/judgement-cut)"
+                ),
+                "Accept": "application/json",
+            },
         )
         status["cheapshark_status"] = r.status_code
         status["cheapshark_ok"] = r.status_code == 200
