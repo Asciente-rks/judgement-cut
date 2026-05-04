@@ -1,7 +1,7 @@
 from databases import Database
 from sqlalchemy import MetaData, Table, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text
 from sqlalchemy import create_engine
-from .core.config import DATABASE_URL
+from .core.config import DATABASE_URL, DATABASE_URL_SYNC
 import sqlalchemy
 import asyncio
 from passlib.context import CryptContext
@@ -63,10 +63,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def create_tables_sync():
-    if not DATABASE_URL:
+    if not DATABASE_URL and not DATABASE_URL_SYNC:
         raise RuntimeError("DATABASE_URL not configured")
     # Use synchronous engine to create tables
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL_SYNC or DATABASE_URL)
     metadata.create_all(engine)
 
 

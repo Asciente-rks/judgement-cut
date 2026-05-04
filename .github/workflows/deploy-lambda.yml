@@ -19,7 +19,8 @@ jobs:
           pip install -r backend/requirements.txt -t backend/package
       - name: Copy source
         run: |
-          cp -r backend/src backend/package/
+          mkdir -p backend/package/backend
+          cp -r backend/src backend/package/backend/
       - name: Zip
         run: |
           cd backend/package
@@ -60,15 +61,12 @@ jobs:
       - name: Create or update Function URL
         env:
           FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          FRONTEND_ORIGIN: ${{ secrets.FRONTEND_ORIGIN }}
         run: |
           set -e
 
-          FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-https://example.com}"
-
           # Create or update Function URL using a temp JSON file to avoid quoting/parsing issues
           CORS_FILE=$(mktemp)
-          CORS_JSON=$(printf '{"AllowOrigins":["%s"],"AllowMethods":["GET","POST"],"AllowHeaders":["Content-Type","Authorization"],"MaxAge":3600}' "$FRONTEND_ORIGIN")
+          CORS_JSON='{"AllowOrigins":["*"],"AllowMethods":["GET","POST","OPTIONS"],"AllowHeaders":["Content-Type","Authorization","X-Scraper-Secret"],"MaxAge":3600}'
           printf '%s' "$CORS_JSON" > "$CORS_FILE"
 
           if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then

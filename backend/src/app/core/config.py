@@ -4,9 +4,14 @@ import os
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-env_path = BASE_DIR / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
+PROJECT_DIR = BASE_DIR.parent
+
+# Prefer backend/.env, fall back to backend/src/.env, then OS env
+env_candidates = [PROJECT_DIR / ".env", BASE_DIR / ".env"]
+for env_path in env_candidates:
+    if env_path.exists():
+        load_dotenv(env_path)
+        break
 else:
     load_dotenv()
 
@@ -18,10 +23,22 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT", "4000")
 DB_NAME = os.getenv("DB_NAME")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_URL_ASYNC")
+DATABASE_URL_SYNC = os.getenv("DATABASE_URL_SYNC")
+
 if not DATABASE_URL and DB_HOST and DB_USERNAME and DB_PASSWORD and DB_NAME:
-    # TiDB/MySQL compatible DSN
-    DATABASE_URL = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # TiDB/MySQL async DSN
+    DATABASE_URL = f"mysql+aiomysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+if not DATABASE_URL_SYNC and DB_HOST and DB_USERNAME and DB_PASSWORD and DB_NAME:
+    # TiDB/MySQL sync DSN (used for table creation)
+    DATABASE_URL_SYNC = f"mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+if DATABASE_URL and not DATABASE_URL_SYNC:
+    DATABASE_URL_SYNC = (
+        DATABASE_URL.replace("+aiomysql", "+pymysql")
+        .replace("+asyncmy", "+pymysql")
+    )
 
 # Auth
 SECRET_KEY = os.getenv("JWT_SECRET") or os.getenv("SECRET_KEY", "change-me-in-prod")
