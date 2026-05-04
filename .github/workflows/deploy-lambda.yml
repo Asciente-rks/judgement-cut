@@ -19,22 +19,36 @@ jobs:
           pip install -r backend/requirements.txt -t backend/package --no-cache-dir
       - name: Strip package to fit Lambda direct-upload size limit
         run: |
-          # === Drop deps already provided by the Lambda Python 3.11 runtime ===
-          # boto3 / botocore / s3transfer all ship in the runtime - bundling
-          # them just bloats the upload. Saves ~12 MB.
-          rm -rf backend/package/boto3 backend/package/botocore backend/package/s3transfer
+          # === Drop entire package + its dist-info for unused deps ===
+          # Each entry takes both:
+          #   backend/package/<pkg>/             (the actual package)
+          #   backend/package/<pkg>-X.Y.Z.dist-info/  (pip metadata)
+          # Removing the package without its dist-info leaves a ~1 MB
+          # orphan dir behind, which is what bit us last time.
+          drop_pkg() {
+            local pkg="$1"
+            rm -rf "backend/package/${pkg}"
+            # dist-info dirs use underscores for hyphens in some package
+            # names (e.g. python_dateutil-2.9.0.dist-info), so check both.
+            rm -rf backend/package/${pkg}-*.dist-info 2>/dev/null || true
+            rm -rf backend/package/${pkg//-/_}-*.dist-info 2>/dev/null || true
+          }
 
-          # === Drop server-only deps (Mangum is the ASGI adapter on Lambda) ===
-          # uvicorn is the local dev server, never imported on Lambda. Its
-          # optional native extras (uvloop / httptools / websockets /
-          # watchfiles) are only pulled in by uvicorn[standard], which is
-          # not in requirements.txt - the rm -rf calls below are harmless
-          # no-ops if those packages aren't present.
-          rm -rf backend/package/uvicorn
-          rm -rf backend/package/uvloop
-          rm -rf backend/package/httptools
-          rm -rf backend/package/websockets
-          rm -rf backend/package/watchfiles
+          # Already in the Lambda Python 3.11 runtime - shipping them is
+          # pure bloat (~12 MB). urllib3 + jmespath are boto3 satellites
+          # only, so they're orphaned once boto3/botocore are gone.
+          for pkg in boto3 botocore s3transfer urllib3 jmespath; do
+            drop_pkg "$pkg"
+          done
+
+          # Server-only deps. handler.py uses Mangum to adapt ASGI to
+          # Lambda; uvicorn is for local dev only and never reached at
+          # runtime. uvloop / httptools / websockets / watchfiles only
+          # come in via uvicorn[standard] which isn't requested - the
+          # drop_pkg calls are harmless if those aren't present.
+          for pkg in uvicorn uvloop httptools websockets watchfiles; do
+            drop_pkg "$pkg"
+          done
 
           # === Drop unused SQLAlchemy dialects ===
           # The app only uses MySQL (databases[mysql] / aiomysql / pymysql).
