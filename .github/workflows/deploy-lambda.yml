@@ -25,23 +25,44 @@ jobs:
           rm -rf backend/package/boto3 backend/package/botocore backend/package/s3transfer
 
           # === Drop server-only deps (Mangum is the ASGI adapter on Lambda) ===
-          # Verified: handler.py imports `mangum` only; nothing in the
-          # runtime path imports uvicorn. uvicorn and its transitive native
-          # deps (uvloop ~3 MB, httptools, websockets, watchfiles) are pure
-          # dead weight in Lambda. Saves ~5-6 MB.
+          # uvicorn is the local dev server, never imported on Lambda. Its
+          # optional native extras (uvloop / httptools / websockets /
+          # watchfiles) are only pulled in by uvicorn[standard], which is
+          # not in requirements.txt - the rm -rf calls below are harmless
+          # no-ops if those packages aren't present.
           rm -rf backend/package/uvicorn
           rm -rf backend/package/uvloop
           rm -rf backend/package/httptools
           rm -rf backend/package/websockets
           rm -rf backend/package/watchfiles
 
+          # === Drop unused SQLAlchemy dialects ===
+          # The app only uses MySQL (databases[mysql] / aiomysql / pymysql).
+          # Each unused dialect dir is ~0.5-1 MB. Saves ~3 MB total.
+          for d in postgresql mssql oracle sqlite sybase firebird; do
+            rm -rf "backend/package/sqlalchemy/dialects/$d"
+          done
+          rm -rf backend/package/sqlalchemy/testing
+
           # === Bytecode caches, type stubs, tests, docs, examples ===
           find backend/package -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
           find backend/package -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.pyi" \) -delete
-          find backend/package -type d \( -name "tests" -o -name "test" -o -name "docs" -o -name "examples" \) -exec rm -rf {} + 2>/dev/null || true
+          find backend/package -type d \( -name "tests" -o -name "test" -o -name "docs" -o -name "examples" -o -name "samples" \) -exec rm -rf {} + 2>/dev/null || true
+
+          # === Docs / license files inside package dirs (not the project root) ===
+          find backend/package -type f \( -iname "README*" -o -iname "CHANGELOG*" -o -iname "CHANGES*" -o -iname "HISTORY*" -o -iname "AUTHORS*" -o -iname "NOTICE*" -o -iname "*.md" -o -iname "*.rst" \) -delete
+
+          # === dist-info chaff (keep METADATA for importlib.metadata; drop the rest) ===
+          # RECORD = file checksums, never needed at runtime; LICENSE files
+          # are ~5-10 KB each but add up across 30+ packages.
+          find backend/package -path "*.dist-info/RECORD" -delete
+          find backend/package -path "*.dist-info/LICENSE*" -delete
+          find backend/package -path "*.dist-info/NOTICE*" -delete
 
           echo "Package size after strip:"
           du -sh backend/package
+          echo "Top 15 fattest top-level packages:"
+          du -sm backend/package/*/ 2>/dev/null | sort -rn | head -15
       - name: Copy source
         run: |
           cp -r backend/src/* backend/package/
@@ -52,6 +73,20 @@ jobs:
           cd ..
           echo "function.zip size:"
           ls -lh function.zip
+      - name: Verify zip fits under direct-upload limit
+        run: |
+          # Lambda's UpdateFunctionCode rejects requests > 70167211 bytes.
+          # The zip is base64-encoded in the request body (~33% inflation),
+          # so the raw zip must stay under ~52 MB. Fail fast with useful
+          # diagnostics instead of waiting for AWS to reject.
+          ZIP_SIZE=$(stat -c%s backend/function.zip)
+          LIMIT=52000000
+          echo "function.zip raw size: $ZIP_SIZE bytes (limit: $LIMIT)"
+          if [ "$ZIP_SIZE" -gt "$LIMIT" ]; then
+            echo "ERROR: function.zip is too large for Lambda direct upload."
+            echo "Strip more from backend/package or move to S3 upload."
+            exit 1
+          fi
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
