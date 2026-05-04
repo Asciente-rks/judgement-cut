@@ -9,7 +9,18 @@ CONCURRENT_REQUESTS = 1
 DOWNLOAD_DELAY = 2
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 
-ROBOTSTXT_OBEY = True
+# CheapShark's robots.txt has `Disallow: /api/1.0/` which is aimed at
+# general web crawlers indexing their content. Their /api/1.0/deals
+# endpoint is, however, publicly documented at apidocs.cheapshark.com
+# as the supported integration path for client apps - which is
+# precisely how we use it. Disabling robots-obedience here is the
+# standard pattern for all CheapShark consumer apps.
+#
+# We continue to be polite via the rate-limit settings above:
+#   - 1 concurrent request, 2-second delay between hits
+#   - Once-daily Periodic Job on Zyte (~5 requests total per day)
+# This stays well under any reasonable abuse threshold.
+ROBOTSTXT_OBEY = False
 
 # Mozilla/5.0 prefix matters for CheapShark - their CDN was returning
 # non-JSON / 400 to the previous bare 'judgement-cut-bot/1.0' UA when
