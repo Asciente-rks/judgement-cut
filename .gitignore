@@ -17,6 +17,7 @@ htmlcov/
 .venv/
 venv/
 ENV/
+package/
 
 # Build / packaging
 build/

@@ -8,5 +8,7 @@ databases[mysql]
 aiomysql
 pymysql
 passlib[bcrypt]
+bcrypt==3.2.2
 python-jose[cryptography]
 boto3
+python-multipart

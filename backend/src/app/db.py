@@ -1,9 +1,10 @@
 from databases import Database
 from sqlalchemy import MetaData, Table, Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text
 from sqlalchemy import create_engine
-from .core.config import DATABASE_URL, DATABASE_URL_SYNC
+from .core.config import DATABASE_URL, DATABASE_URL_SYNC, DB_HOST, DB_SSL, DB_SSL_CA
 import sqlalchemy
 import asyncio
+import ssl
 from passlib.context import CryptContext
 from datetime import datetime
 
@@ -56,8 +57,20 @@ crawler_settings = Table(
     Column("value", Text, nullable=True),
 )
 
+def _build_ssl_context() -> ssl.SSLContext | None:
+    use_ssl = DB_SSL or bool(DB_SSL_CA) or (DB_HOST and DB_HOST.endswith("tidbcloud.com"))
+    if not use_ssl:
+        return None
+    if DB_SSL_CA:
+        return ssl.create_default_context(cafile=DB_SSL_CA)
+    return ssl.create_default_context()
+
+
+_ssl_context = _build_ssl_context()
+_db_kwargs = {"ssl": _ssl_context} if _ssl_context else {}
+
 # Database object for async operations
-database = Database(DATABASE_URL)
+database = Database(DATABASE_URL, **_db_kwargs)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -66,7 +79,8 @@ def create_tables_sync():
     if not DATABASE_URL and not DATABASE_URL_SYNC:
         raise RuntimeError("DATABASE_URL not configured")
     # Use synchronous engine to create tables
-    engine = create_engine(DATABASE_URL_SYNC or DATABASE_URL)
+    connect_args = {"ssl": _ssl_context} if _ssl_context else {}
+    engine = create_engine(DATABASE_URL_SYNC or DATABASE_URL, connect_args=connect_args)
     metadata.create_all(engine)
 
 

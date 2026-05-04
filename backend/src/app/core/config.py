@@ -22,6 +22,8 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT", "4000")
 DB_NAME = os.getenv("DB_NAME")
+DB_SSL = os.getenv("DB_SSL", "").lower() in ("1", "true", "yes")
+DB_SSL_CA = os.getenv("DB_SSL_CA")
 
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_URL_ASYNC")
 DATABASE_URL_SYNC = os.getenv("DATABASE_URL_SYNC")
