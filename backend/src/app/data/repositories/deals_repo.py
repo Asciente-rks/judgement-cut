@@ -160,6 +160,22 @@ async def update_regional_pricing(deal_id: str, *,
     return await database.execute(query)
 
 
+async def update_steam_app_id(deal_id: str, steam_app_id: str) -> int:
+    """Persist a Steam app_id recovered via title-search.
+
+    Used by the title-search fallback in steam_pricing when CheapShark
+    didn't originally include the steamAppID for a Steam deal. Storing
+    it here means the next ingest (and finalize Phase 1 re-attempts)
+    can skip the search and go straight to the regional API.
+    """
+    query = (
+        featured_deals.update()
+        .where(featured_deals.c.deal_id == deal_id)
+        .values(steam_app_id=steam_app_id)
+    )
+    return await database.execute(query)
+
+
 async def mark_stale_deals_inactive(run_started_at_epoch: int) -> int:
     """Set is_active=0 for any deal not seen in the latest crawl.
 
@@ -226,12 +242,16 @@ async def get_active_deals_needing_enrichment(
     Limit is conservative (50) so the finalize call comfortably fits
     inside the Lambda 30s budget - 50 deals at ~5 concurrent = ~10s.
     """
+    # Note: we DON'T filter by `steam_app_id != None` anymore. Some Steam
+    # deals come from CheapShark without a steamAppID; the title-search
+    # fallback in _enrich_steam_pricing can still recover them by name.
+    # If the title doesn't match anything on Steam, the enrichment is a
+    # no-op and the row stays with NULL price_php (correct behavior).
     query = (
         featured_deals.select()
         .where(
             (featured_deals.c.is_active == True)  # noqa: E712
             & (featured_deals.c.store_id == "1")  # Steam store ID in CheapShark
-            & (featured_deals.c.steam_app_id != None)  # noqa: E711
             & (featured_deals.c.price_php == None)  # noqa: E711
         )
         .limit(limit)
