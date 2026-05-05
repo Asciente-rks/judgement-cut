@@ -2,19 +2,41 @@
 
 > A daily-refreshing dashboard of game deals across **Steam**, **GOG**, **Humble**, and **Epic**, with **native Steam Philippine peso pricing** so the numbers match what you actually pay.
 
-Originally built for personal use — designed to cost **$0/month forever** on free tiers across the entire stack.
+Originally built for personal use — designed to cost **$0/month forever** on free tiers across the entire stack. CheapShark gives the deal feed, Steam's regional API gives native PHP prices, Zyte Scrapy Cloud runs the daily crawl, AWS Lambda + TiDB Cloud + Cloudflare R2 do the rest.
 
 ---
 
-## What it does
+## Live Demo
 
-- **Crawls 4 storefronts daily** at 02:00 PHT — Steam (8 pages, ~480 deals filtered to `steamRating ≥ 70`), GOG (top 60), Humble (top 60), and Epic (free games only)
-- **Native Steam PH pricing** — queries `store.steampowered.com/api/appdetails?cc=PH` directly so prices match Steam's storefront exactly, not a USD × FX approximation
-- **Title-search fallback** — if CheapShark doesn't include `steamAppID` for a deal, we search Steam by title to recover it
-- **Honest pricing badges** — green "Steam PH price" for accurate native PHP, amber "USD est." when we have to fall back to FX conversion
-- **Price history** per deal with all-time-low tracker
-- **Admin panel** with platform toggles, user management, and scraper monitor heartbeat
-- **Lambda-frugal** — batched ingest cuts invocations to ~900/month, well under the 1M free tier
+> No public demo — this is a personal dashboard with self-hosted credentials. To run it, deploy from this repo (instructions in [Deployment](#deployment)).
+
+---
+
+## Table of Contents
+
+1. [What It Does](#what-it-does)
+2. [Architecture](#architecture)
+3. [Tech Stack](#tech-stack)
+4. [Database Design](#database-design)
+5. [Repository Layout](#repository-layout)
+6. [API Reference](#api-reference)
+7. [Authentication & Credentials](#authentication--credentials)
+8. [Deployment](#deployment)
+9. [Cost Breakdown](#cost-breakdown)
+10. [Local Development](#local-development)
+11. [Author](#author)
+
+---
+
+## What It Does
+
+- **Crawls 4 storefronts daily** at 02:00 PHT — Steam (8 pages, ~480 deals filtered to `steamRating ≥ 70`), GOG (top 60), Humble (top 60), and Epic (free games only).
+- **Native Steam PH pricing** — queries `store.steampowered.com/api/appdetails?cc=PH` directly so prices match Steam's storefront exactly, not a USD × FX approximation.
+- **Title-search fallback** — if CheapShark doesn't include `steamAppID` for a deal, we search Steam by title to recover it.
+- **Honest pricing badges** — green "Steam PH price" for accurate native PHP, amber "USD est." when we have to fall back to FX conversion.
+- **Price history per deal** with all-time-low tracker.
+- **Admin panel** with platform toggles, user management, and scraper monitor heartbeat.
+- **Lambda-frugal** — batched ingest cuts invocations to ~900/month, well under the 1M free tier.
 
 ---
 
@@ -61,16 +83,24 @@ Originally built for personal use — designed to cost **$0/month forever** on f
                       └───────────────────────┘
 ```
 
+**Notable architectural choices:**
+
+- **No API Gateway** — the Lambda exposes a Function URL directly. Saves ~$3.50/M after the API Gateway free tier expires.
+- **5-way parallel Steam enrichment** with a semaphore — keeps the regional API calls within Steam's rate limits while finishing a 480-item crawl in seconds, not minutes.
+- **3-phase finalize** at the end of every crawl: re-enrich any deals still missing `price_php`, mark deals not seen this run as `is_active = 0`, then delete the inactive rows so the table = latest crawl.
+- **Title-search fallback** — for the few percent of CheapShark deals missing `steamAppID`, we search Steam's `storesearch` API and persist the recovered ID so subsequent runs skip the lookup.
+- **Daily cron via GitHub Actions, not Scrapy Cloud Periodic Jobs** — saves the paid Periodic Jobs feature; just hit Zyte's `run.json` endpoint with the API key.
+
 ---
 
-## Tech stack
+## Tech Stack
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
 | **Spider** | Scrapy on Zyte Scrapy Cloud | Free tier, rotating IPs, 1 free spider unit |
-| **Backend** | FastAPI + Mangum on AWS Lambda | Free tier 1M invocations/month, ap-southeast-1 region |
-| **Database** | TiDB Cloud (Serverless) | 5GB free, MySQL-compatible, no cold start |
-| **Object storage** | Cloudflare R2 | 10GB free, no egress fees |
+| **Backend** | FastAPI + Mangum on AWS Lambda | Free tier 1M invocations/mo, ap-southeast-1 region |
+| **Database** | TiDB Cloud Serverless | **5 GB free perpetually**, MySQL-compatible, no cold start |
+| **Object storage** | Cloudflare R2 | **10 GB free, zero egress** — cheap thumbnail mirror |
 | **Frontend** | React 18 + Vite 5 + Tailwind 3 | Single SPA, fast dev loop |
 | **Scheduler** | GitHub Actions cron | Free for public repos, ~1 min/month usage |
 | **Deal source** | CheapShark API (USD) | Free, no key required |
@@ -79,11 +109,12 @@ Originally built for personal use — designed to cost **$0/month forever** on f
 
 ---
 
-## Database schema
+## Database Design
 
 Five tables on TiDB. The interesting ones:
 
 ### `featured_deals`
+
 Active deals shown on the dashboard. Wiped down to the latest crawl on every spider run via the finalize step.
 
 | Column | Type | Notes |
@@ -105,6 +136,7 @@ Active deals shown on the dashboard. Wiped down to the latest crawl on every spi
 **Unique index on `deal_id`** is what makes `INSERT … ON DUPLICATE KEY UPDATE` work.
 
 ### `price_history`
+
 Every observed price for every deal. Survives `featured_deals` deletions so historical lookups keep working.
 
 | Column | Type | Notes |
@@ -115,19 +147,36 @@ Every observed price for every deal. Survives `featured_deals` deletions so hist
 | `recorded_at` | DATETIME | observation time |
 
 ### `crawler_settings`
+
 Key-value heartbeat keys read by the admin monitor:
-- `_last_ingest_at` / `_last_ingest_count`
-- `_last_finalize_at` / `_last_finalize_deactivated` / `_last_finalize_deleted`
-- `_last_finalize_reenriched` (e.g. `"42/50"` = 42 successes out of 50 retry attempts)
-- `_fx_rate_*` (cached USD→PHP, refreshed every 24h)
+
+| Key | What it tells you |
+|-----|-------------------|
+| `_last_ingest_at` / `_last_ingest_count` | last spider POST + how many items |
+| `_last_finalize_at` / `_last_finalize_deactivated` / `_last_finalize_deleted` | finalize phase metrics |
+| `_last_finalize_reenriched` | e.g. `"42/50"` = 42 successes out of 50 retry attempts |
+| `_fx_rate_*` | cached USD→PHP, refreshed every 24h |
 
 ### `users`
-Username + bcrypt hash. Two seeded accounts:
-- `admin` / `adminpass` — full admin access
-- `user` / `userpass` — read-only
+
+Username + bcrypt hash. Two seeded accounts (see [Authentication & Credentials](#authentication--credentials)).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT (PK) | autoincrement |
+| `username` | VARCHAR | unique |
+| `password_hash` | VARCHAR | bcrypt |
+| `is_admin` | TINYINT(1) | admin gate |
 
 ### `platforms`
+
 Toggle which CheapShark stores show up on the search page (`is_enabled`). Doesn't affect the daily crawl.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INT (PK) | autoincrement |
+| `name` | VARCHAR | unique platform name |
+| `is_enabled` | TINYINT(1) | dashboard toggle |
 
 ---
 
@@ -135,17 +184,18 @@ Toggle which CheapShark stores show up on the search page (`is_enabled`). Doesn'
 
 For a typical Steam deal, the data flow is:
 
-1. **CheapShark gives us USD price + `steamAppID`** during the crawl
-2. **We call Steam's `appdetails?cc=PH`** in parallel (5-way semaphore) for the native PHP price
-3. **If Steam returns valid PHP** → store as `price_php` / `normal_price_php`. Frontend shows it with green "Steam PH price" badge
-4. **If Steam fails** (timeout, 5xx, success=false) → we retry up to 3 times with exponential backoff
-5. **If still no PHP price** → leave `price_php = NULL`. Frontend falls back to USD × FX with amber **"USD est."** badge
+1. **CheapShark gives us USD price + `steamAppID`** during the crawl.
+2. **We call Steam's `appdetails?cc=PH`** in parallel (5-way semaphore) for the native PHP price.
+3. **If Steam returns valid PHP** → store as `price_php` / `normal_price_php`. Frontend shows it with green "Steam PH price" badge.
+4. **If Steam fails** (timeout, 5xx, success=false) → we retry up to 3 times with exponential backoff.
+5. **If still no PHP price** → leave `price_php = NULL`. Frontend falls back to USD × FX with amber **"USD est."** badge.
 
 For Steam deals **without `steamAppID`** (a few % of CheapShark's catalog):
-1. Title-search Steam's `storesearch` API
-2. If top result's name has substring relationship with our title, use its `appid`
-3. Persist via `update_steam_app_id` so next run skips the search
-4. Continue with the regional API path above
+
+1. Title-search Steam's `storesearch` API.
+2. If top result's name has substring relationship with our title, use its `appid`.
+3. Persist via `update_steam_app_id` so next run skips the search.
+4. Continue with the regional API path above.
 
 The end-of-crawl **finalize endpoint** does three things in order:
 
@@ -159,7 +209,7 @@ Phase 3 is what keeps TiDB row count = Zyte run total = dashboard "live deals" c
 
 ---
 
-## Repository structure
+## Repository Layout
 
 ```
 .
@@ -216,6 +266,50 @@ Phase 3 is what keeps TiDB row count = Zyte run total = dashboard "live deals" c
 
 ---
 
+## API Reference
+
+All `/v1/*` routes require a JWT in `Authorization: Bearer <token>`. Internal routes are gated by the `X-Scraper-Secret` header.
+
+| Method | Endpoint | Auth | Purpose |
+|--------|----------|------|---------|
+| `POST` | `/auth/login` | none | username/password → JWT |
+| `GET` | `/v1/me` | JWT | current user info |
+| `GET` | `/v1/deals/featured?limit=N` | JWT | top N active deals by deal_rating |
+| `GET` | `/v1/deals/search?title=X` | JWT | live CheapShark proxy |
+| `GET` | `/v1/deals/{id}/history` | JWT | price history for a deal |
+| `GET` | `/v1/deals/{id}/thumbnail` | JWT | lazy R2-mirrored thumbnail URL |
+| `GET` | `/v1/exchange-rate?base=USD&target=PHP` | JWT | cached FX rate |
+| `GET` | `/v1/admin/platforms` | JWT + admin | enabled-platforms list |
+| `POST` | `/v1/admin/platforms/{name}/toggle?enabled=…` | JWT + admin | flip platform |
+| `GET` | `/v1/admin/users` | JWT + admin | user list |
+| `POST` | `/v1/admin/users/{username}/admin?enabled=…` | JWT + admin | promote/demote |
+| `GET` | `/v1/admin/monitor/scraper` | JWT + admin | heartbeat keys |
+| `POST` | `/internal/ingest` | shared secret | spider POSTs deal items (single or batched list) |
+| `POST` | `/internal/ingest/finalize` | shared secret | spider POSTs `{run_started_at}` at end of crawl |
+
+---
+
+## Authentication & Credentials
+
+### Seeded accounts
+
+The first deploy creates two accounts (idempotent — re-running the migration is safe).
+
+| Username | Password | Role |
+|---|---|---|
+| `admin` | `adminpass` | full admin access |
+| `user` | `userpass` | read-only |
+
+### Self-registration
+
+Currently disabled — the dashboard is single-tenant by design. To add more users:
+
+1. Sign in as `admin`.
+2. Use the admin panel's user management to create accounts (or run a one-off SQL `INSERT` against `users`).
+3. Promote/demote via `POST /v1/admin/users/{username}/admin?enabled=true`.
+
+---
+
 ## Deployment
 
 ### Required GitHub repository secrets
@@ -261,46 +355,33 @@ You can also trigger it manually from the **Actions** tab → "Run Spider Daily"
 
 ---
 
-## API endpoints
+## Cost Breakdown
 
-All `/v1/*` routes require a JWT in `Authorization: Bearer <token>`. Internal routes are gated by the `X-Scraper-Secret` header.
-
-| Endpoint | Auth | Purpose |
-|----------|------|---------|
-| `POST /auth/login` | none | username/password → JWT |
-| `GET  /v1/me` | JWT | current user info |
-| `GET  /v1/deals/featured?limit=N` | JWT | top N active deals by deal_rating |
-| `GET  /v1/deals/search?title=X` | JWT | live CheapShark proxy |
-| `GET  /v1/deals/{id}/history` | JWT | price history for a deal |
-| `GET  /v1/deals/{id}/thumbnail` | JWT | lazy R2-mirrored thumbnail URL |
-| `GET  /v1/exchange-rate?base=USD&target=PHP` | JWT | cached FX rate |
-| `GET  /v1/admin/platforms` | JWT + admin | enabled-platforms list |
-| `POST /v1/admin/platforms/{name}/toggle?enabled=…` | JWT + admin | flip platform |
-| `GET  /v1/admin/users` | JWT + admin | user list |
-| `POST /v1/admin/users/{username}/admin?enabled=…` | JWT + admin | promote/demote |
-| `GET  /v1/admin/monitor/scraper` | JWT + admin | heartbeat keys |
-| `POST /internal/ingest` | shared secret | spider POSTs deal items (single or batched list) |
-| `POST /internal/ingest/finalize` | shared secret | spider POSTs `{run_started_at}` at end of crawl |
-
----
-
-## Cost breakdown — designed for $0/month forever
+> **Designed for $0/month forever.** Personal dashboard, production-grade infra, zero recurring spend.
 
 | Service | Free tier | We use | Headroom |
 |---------|-----------|--------|----------|
-| AWS Lambda | 1M invocations/mo | ~900 | 99.9% |
-| AWS Lambda compute | 400K GB-s/mo | ~10K GB-s | 97.5% |
-| TiDB Cloud Serverless | 5 GB storage | <100 MB | 98% |
-| Cloudflare R2 | 10 GB / 10M ops/mo | <1 GB | 90%+ |
-| GitHub Actions (cron) | 2000 min/mo | ~1 min | 99.9% |
-| Zyte Scrapy Cloud | 1 free spider, daily run | 1 spider | within limits |
-| CheapShark / Steam / Epic APIs | unlimited public | ~1500 calls/day | within limits |
+| **AWS Lambda** | 1M invocations/mo | ~900 | **99.9%** |
+| **AWS Lambda compute** | 400K GB-s/mo | ~10K GB-s | **97.5%** |
+| **TiDB Cloud Serverless** | 5 GB storage | <100 MB | **98%** |
+| **Cloudflare R2** | 10 GB / 10M ops/mo | <1 GB | **90%+** |
+| **GitHub Actions (cron)** | 2000 min/mo (private) / unlimited (public) | ~1 min | **99.9%** |
+| **Zyte Scrapy Cloud** | 1 free spider, daily run | 1 spider | within limits |
+| **CheapShark / Steam / Epic APIs** | unlimited public | ~1500 calls/day | within limits |
 
 **Total: $0/month**, with massive headroom on every line.
 
+**Why each free tier was chosen:**
+
+- **Zyte Scrapy Cloud over self-hosted scrapers** — rotating IPs included, no Cloudflare bot-protection battles, free tier covers a daily crawl.
+- **TiDB Cloud over RDS / Aurora** — RDS free tier expires after 12 months; TiDB Cloud's free tier is **perpetual**.
+- **R2 over S3** — S3 charges per-GB egress; R2 is **zero egress**, which matters when serving thumbnail URLs to a frontend.
+- **GitHub Actions cron over Zyte Periodic Jobs** — Periodic Jobs is paid; Actions cron is free and just hits Zyte's `run.json` API.
+- **Lambda Function URL over API Gateway** — Function URLs are free; API Gateway has its own pricing tier after the 12-month new-account window.
+
 ---
 
-## Local development
+## Local Development
 
 ```bash
 # Backend (Python 3.11)
@@ -326,6 +407,6 @@ scrapy crawl games
 
 ---
 
-## License
+## Author
 
-Personal project. No license attached. If you want to fork it, go ahead — just understand it was tuned for one Filipino gamer's use case.
+Built by **Ralph Kenneth F. Sonio** ([@Asciente-rks](https://github.com/Asciente-rks)). Personal project tuned for one Filipino gamer's use case — fork freely.
