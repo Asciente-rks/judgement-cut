@@ -193,3 +193,89 @@ async def fetch_steam_regional_price(
         final=final,
         discount_percent=int(overview.get("discount_percent") or 0),
     )
+
+
+_STEAM_STORESEARCH = "https://store.steampowered.com/api/storesearch/"
+
+
+async def search_steam_appid_by_title(title: str) -> Optional[str]:
+    """Look up a Steam app_id by game title.
+
+    Used as a fallback when CheapShark didn't include `steamAppID` for a
+    Steam-store deal (a few percent of CheapShark's Steam catalog).
+    Without this, the deal stays with price_php=NULL and the frontend
+    falls back to USD * FX even though Steam HAS a native PH price for
+    that game.
+
+    Confidence check: only return the app_id if the matched name has a
+    substring relationship with the search title. Catches obvious wrong
+    matches like searching "Rust" and getting "Rust - Voice Props Pack"
+    - Steam orders by relevance so the top result is usually right, but
+    the similar-name DLC trap is real.
+
+    Returns None when:
+      - title is empty
+      - Steam search returns no results
+      - The top result isn't an "app" (could be DLC bundle, sub, etc.)
+      - The top result's name doesn't substring-match the search title
+      - The Steam API call fails
+    """
+    if not title:
+        return None
+
+    params = {
+        "term": title,
+        "cc": "PH",
+        "l": "en",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            headers=_HEADERS,
+        ) as client:
+            resp = await client.get(_STEAM_STORESEARCH, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as e:
+        logger.warning("Steam storesearch failed for title=%r: %s", title, e)
+        return None
+
+    items = payload.get("items") or []
+    if not items:
+        logger.debug("Steam storesearch no results for title=%r", title)
+        return None
+
+    top = items[0]
+    if top.get("type") != "app":
+        # Could be "sub" (sub-product / package) or "bundle". Those don't
+        # have prices in the appdetails API the same way, so skip.
+        return None
+
+    found_name = (top.get("name") or "").strip().lower()
+    sought_name = title.strip().lower()
+    if not found_name:
+        return None
+
+    # Substring match in either direction. We don't require exact match
+    # because CheapShark titles often have edition suffixes ("Game of the
+    # Year Edition") while Steam shows the base name.
+    if found_name == sought_name:
+        match_kind = "exact"
+    elif sought_name in found_name or found_name in sought_name:
+        match_kind = "substring"
+    else:
+        logger.debug(
+            "Steam storesearch title-mismatch: sought=%r found=%r",
+            title, found_name,
+        )
+        return None
+
+    appid = top.get("id")
+    if not appid or not str(appid).isdigit():
+        return None
+
+    logger.info(
+        "Steam storesearch matched title=%r -> appid=%s (%s match: %r)",
+        title, appid, match_kind, found_name,
+    )
+    return str(appid)
