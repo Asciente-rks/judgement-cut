@@ -1,27 +1,50 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 from .api.auth import router as auth_router
 from .api.v1.user_routes import router as user_router
 from .api.v1.admin_routes import router as admin_router
 from . import db
 from .core import config
-
+from .core.security import IPRateLimitMiddleware, SecurityHeadersMiddleware
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Game Deals API")
+
+    docs_kwargs = (
+        dict(docs_url=None, redoc_url=None, openapi_url=None)
+        if config.IS_PRODUCTION
+        else dict()
+    )
+    app = FastAPI(title="Game Deals API", **docs_kwargs)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+        max_age=600,
+    )
+
+    app.add_middleware(IPRateLimitMiddleware)
+
+    app.add_middleware(SecurityHeadersMiddleware)
+
     app.include_router(user_router, prefix="/v1", tags=["user"])
     app.include_router(admin_router, prefix="/v1/admin", tags=["admin"])
     app.include_router(auth_router, prefix="/auth", tags=["auth"])
-    # internal ingestion and monitoring endpoints (protected by scraper secret)
+
     from .api.internal import router as internal_router
     app.include_router(internal_router, prefix="/internal", tags=["internal"])
 
     @app.on_event("startup")
     async def startup():
-        # create tables sync then connect
+
         try:
             db.create_tables_sync()
         except Exception:
-            # ignore creation errors in environments without DB
+
             pass
         await db.connect_db()
         try:
@@ -33,7 +56,13 @@ def create_app() -> FastAPI:
     async def shutdown():
         await db.disconnect_db()
 
-    return app
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+        )
 
+    return app
 
 app = create_app()

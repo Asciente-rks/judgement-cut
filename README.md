@@ -308,6 +308,30 @@ Currently disabled — the dashboard is single-tenant by design. To add more use
 2. Use the admin panel's user management to create accounts (or run a one-off SQL `INSERT` against `users`).
 3. Promote/demote via `POST /v1/admin/users/{username}/admin?enabled=true`.
 
+### Dev Tools quick-login
+
+The login screen ships with a floating **⚙ Dev Tools** button in the bottom-right corner. Click it to one-shot sign in as either seeded account — handy for portfolio reviewers who don't want to type credentials. The panel only auto-fills; the actual login still goes through the rate-limited `/auth/login` endpoint.
+
+---
+
+## Hardening
+
+For a portfolio deployment that anyone can reach, the API and frontend ship a few defenses:
+
+- **IP rate limiting** (in-process middleware, no Redis required)
+  - `POST /auth/login`: 5 requests / 60s per IP — deters password brute-forcing
+  - All other routes: 120 requests / 60s per IP — deters drive-by scraping / DoS
+  - `/internal/*` is exempt because it's gated by `SCRAPER_SECRET` and called by the trusted spider
+  - Returns `429` with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`
+- **Security headers** on every response: `Content-Security-Policy: default-src 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` — plus `Server: JudgementCut` to mask framework fingerprinting
+- **CORS allowlist** driven by the `CORS_ORIGINS` env var (defaults: `https://judgement-cut.vercel.app`, `http://localhost:5173`, `http://127.0.0.1:5173`)
+- **Auto-docs hidden in production** — when `ENV=production`, `/docs`, `/redoc` and `/openapi.json` are turned off so the deployed surface area shrinks
+- **Generic 500s** — a global exception handler returns `{"detail": "Internal server error"}` instead of leaking tracebacks
+- **Frontend bundle hardening**
+  - `console.*` and `debugger` statements are stripped from production builds via Vite's esbuild `drop` option
+  - Source maps are disabled in prod and chunk filenames are hashed so original module paths aren't visible
+  - `installSecurityHardening()` (`frontend/src/lib/security.js`) blocks the right-click context menu, F12, Ctrl+Shift+I/J/C, Ctrl+U/S, and overrides every `console.*` method with no-ops in production. This is a **deterrent**, not real security — never put secrets in client code.
+
 ---
 
 ## Deployment

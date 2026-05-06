@@ -5,14 +5,11 @@ from ..core.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
 from datetime import datetime, timedelta
 from jose import jwt
 
-
 class LoginIn(BaseModel):
     username: str
     password: str
 
-
 router = APIRouter()
-
 
 @router.post("/login")
 async def login(payload: LoginIn):

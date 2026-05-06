@@ -4,7 +4,6 @@ from ..clients.cheapshark import fetch_deals
 
 router = APIRouter()
 
-
 @router.get("/deals")
 async def get_deals(storeID: Optional[str] = None, title: Optional[str] = None, pageSize: int = 60):
     params = {}

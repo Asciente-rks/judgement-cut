@@ -1,4 +1,4 @@
-# Automatically created by: shub deploy
+
 
 from setuptools import setup, find_packages
 

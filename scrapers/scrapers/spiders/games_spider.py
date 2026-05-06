@@ -5,7 +5,6 @@ import scrapy
 
 from ..items import DealItem
 
-
 class GamesSpider(scrapy.Spider):
     name = "games"
 
@@ -15,26 +14,6 @@ class GamesSpider(scrapy.Spider):
         "?locale=en-US&country=US&allowCountries=US"
     )
 
-    # CheapShark caps pageSize at 60 per request. We paginate per-store
-    # because the user shops mostly on Steam, so Steam gets a much
-    # deeper crawl while GOG / Humble stay shallow.
-    #
-    # Steam-specific filters (from CheapShark API):
-    #   sortBy=Reviews   -> rank by Steam reviews count (popularity proxy),
-    #                       so we always grab AAA + popular indie hits like
-    #                       Sons of the Forest / Raft / Valheim and skip the
-    #                       long tail of asset-flip shovelware.
-    #   steamRating=70   -> only deals with Steam % positive >= 70, which
-    #                       further filters out poorly-reviewed games.
-    #
-    # GOG / Humble keep the default sort because the user said those are
-    # fine as-is (they're shallow enough that quality filtering isn't
-    # worth a separate code path).
-    #
-    # Total ~600 quality Steam deals + 60 GOG + 60 Humble + ~5 Epic free
-    # = ~725 items per run. With batched ingest (25/POST) this is ~30
-    # Lambda invocations/day = ~900/month, comfortably under the 1M
-    # free tier even with other apps deployed.
     CHEAPSHARK_STORES = {
         "steam": {
             "id": "1",
@@ -45,8 +24,6 @@ class GamesSpider(scrapy.Spider):
         "humble": {"id": "11", "pages": 1},
     }
 
-    # Epic's API ships an array of typed images per game. We pick the
-    # first one matching any of these (in order) for the thumbnail.
     _EPIC_IMAGE_PRIORITY = (
         "OfferImageWide",
         "DieselStoreFrontWide",
@@ -55,8 +32,7 @@ class GamesSpider(scrapy.Spider):
     )
 
     def start_requests(self):
-        # CheapShark sales per platform, paginated. CheapShark uses
-        # 0-indexed pageNumber and a cap of 60 results per page.
+
         for store_name, cfg in self.CHEAPSHARK_STORES.items():
             store_id = cfg["id"]
             pages = cfg["pages"]
@@ -82,13 +58,10 @@ class GamesSpider(scrapy.Spider):
                         "page_num": page_num,
                     },
                     headers={"Accept": "application/json"},
-                    # Don't let middlewares filter this on duplicate URL or
-                    # cache - we always want a live hit so the diagnostic
-                    # logs reflect the current state.
+
                     dont_filter=True,
                 )
 
-        # Epic free games (official store feed)
         yield scrapy.Request(
             self.EPIC_FREE,
             callback=self.parse_epic_free,
@@ -96,9 +69,7 @@ class GamesSpider(scrapy.Spider):
         )
 
     def errback_cheapshark(self, failure):
-        """Surface network-level failures (DNS, TCP, TLS) that wouldn't
-        produce a Response object at all. Without this, the spider just
-        finishes silently with no clue what happened."""
+
         request = failure.request
         store = request.cb_kwargs.get("store_name", "?")
         self.logger.error(
@@ -109,8 +80,7 @@ class GamesSpider(scrapy.Spider):
         )
 
     def parse_cheapshark(self, response, store_name, store_id, page_num=0):
-        # Diagnostic: log status, length and content-type so we can tell
-        # whether Zyte's IPs are hitting a 200-empty / 403 / HTML wall.
+
         self.logger.info(
             "CheapShark store=%s page=%d status=%s length=%d content-type=%s",
             store_name,
@@ -123,9 +93,7 @@ class GamesSpider(scrapy.Spider):
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError:
-            # Show what we actually got so we can tell the difference
-            # between a CAPTCHA HTML page, a plaintext 'Access Denied',
-            # or a partial JSON.
+
             self.logger.warning(
                 "CheapShark store=%s returned non-JSON. First 300 chars: %s",
                 store_name,
@@ -158,12 +126,9 @@ class GamesSpider(scrapy.Spider):
             item["price"] = self._to_float(deal.get("salePrice"))
             item["normal_price"] = self._to_float(deal.get("normalPrice"))
             item["deal_rating"] = self._to_float(deal.get("dealRating"))
-            # CheapShark already returns the cover-art URL on /deals; we
-            # just preserve it. No extra HTTP request needed.
+
             item["thumbnail_url"] = deal.get("thumb") or None
-            # CheapShark also returns `steamAppID` for Steam deals -
-            # the backend uses this to fetch native PHP pricing from
-            # store.steampowered.com instead of guessing via USD->PHP FX.
+
             item["steam_app_id"] = deal.get("steamAppID") or None
             if deal_id:
                 item["url"] = f"https://www.cheapshark.com/redirect?dealID={deal_id}"
@@ -212,7 +177,7 @@ class GamesSpider(scrapy.Spider):
             item["normal_price"] = normal_price
             item["deal_rating"] = None
             item["url"] = url
-            # Epic ships a typed image array; pick a wide cover if available.
+
             item["thumbnail_url"] = self._pick_epic_image(game.get("keyImages"))
             item["scraped_at"] = datetime.utcnow().isoformat()
             yield item
@@ -232,7 +197,7 @@ class GamesSpider(scrapy.Spider):
         for preferred in cls._EPIC_IMAGE_PRIORITY:
             if preferred in by_type:
                 return by_type[preferred]
-        # No preferred type found - return whatever's there, if anything.
+
         return next(iter(by_type.values()), None)
 
     @staticmethod

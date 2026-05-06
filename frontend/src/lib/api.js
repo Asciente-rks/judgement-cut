@@ -24,10 +24,6 @@ function authHeader(token) {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
 export async function login(username, password) {
   return request("/auth/login", {
     method: "POST",
@@ -38,10 +34,6 @@ export async function login(username, password) {
 export async function fetchMe(token) {
   return request("/v1/me", { headers: authHeader(token) });
 }
-
-// ---------------------------------------------------------------------------
-// Deals
-// ---------------------------------------------------------------------------
 
 export async function fetchFeaturedDeals(token, limit = 20) {
   return request(`/v1/deals/featured?limit=${limit}`, {
@@ -68,20 +60,12 @@ export async function fetchThumbnail(token, dealId) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Currency / FX
-// ---------------------------------------------------------------------------
-
 export async function fetchExchangeRate(token, base = "USD", target = "PHP") {
   const q = new URLSearchParams({ base, target });
   return request(`/v1/exchange-rate?${q.toString()}`, {
     headers: authHeader(token),
   });
 }
-
-// ---------------------------------------------------------------------------
-// Admin
-// ---------------------------------------------------------------------------
 
 export async function fetchPlatforms(token) {
   return request("/v1/admin/platforms", { headers: authHeader(token) });

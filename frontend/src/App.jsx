@@ -15,10 +15,6 @@ import {
   togglePlatform,
 } from "./lib/api";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const PLATFORM_CONFIG = [
   {
     key: "steam",
@@ -49,16 +45,10 @@ const PLATFORM_CONFIG = [
 
 const STORE_NAME = { 1: "Steam", 7: "GOG", 11: "Humble", 25: "Epic" };
 
-// ISO 4217 codes the UI lets the user toggle between. PHP first because
-// the audience is in PH; USD is the canonical price source.
 const CURRENCIES = [
   { code: "PHP", symbol: "₱", label: "PHP" },
   { code: "USD", symbol: "$", label: "USD" },
 ];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function resolvePlatformKey(deal) {
   const storeId = String(deal.storeID || deal.store_id || "");
@@ -83,7 +73,7 @@ function dealId(deal) {
 }
 
 function pickPrice(deal) {
-  // Prefer numeric, accept strings; null/undefined returns null.
+
   const candidates = [deal.salePrice, deal.price, deal.sale_price];
   for (const v of candidates) {
     if (v === null || v === undefined || v === "") continue;
@@ -103,10 +93,6 @@ function pickNormalPrice(deal) {
   return null;
 }
 
-// Some rows in price_history have NULL or epoch (1970-01-01) timestamps
-// because the original column lacked a default before our recent fix.
-// Treat anything before 2020 as garbage so the modal doesn't render
-// "1/1/1970" rows next to real ones.
 function formatHistoryDate(value, mode = "datetime") {
   if (!value) return "—";
   const d = new Date(value);
@@ -115,9 +101,6 @@ function formatHistoryDate(value, mode = "datetime") {
   return mode === "date" ? d.toLocaleDateString() : d.toLocaleString();
 }
 
-// Steam-native regional pricing pre-fetched by the backend during
-// /internal/ingest. Returns {sale, normal} when available, else null
-// so the caller falls back to FX-converted USD.
 function pickRegionalPhpPrice(deal) {
   const sale = deal.price_php;
   const normal = deal.normal_price_php;
@@ -147,9 +130,6 @@ function decodeJwt(token) {
   }
 }
 
-// Format a USD price into the active currency, using the cached FX
-// rate. If FX hasn't loaded yet, fall back to USD so the UI never
-// shows broken values.
 function formatPrice(value, currency, fxRate) {
   if (value === null || value === undefined || value === "") return "—";
   const num = Number(value);
@@ -163,10 +143,6 @@ function formatPrice(value, currency, fxRate) {
   return `${cur.symbol}${converted.toFixed(2)}`;
 }
 
-// ---------------------------------------------------------------------------
-// Top-level App
-// ---------------------------------------------------------------------------
-
 export default function App() {
   const [session, setSession] = useState(() => ({
     token: localStorage.getItem("jc_token") || null,
@@ -174,7 +150,7 @@ export default function App() {
   const [me, setMe] = useState(null);
   const [meError, setMeError] = useState(null);
 
-  const [view, setView] = useState("dashboard"); // dashboard | search | admin
+  const [view, setView] = useState("dashboard");
   const [currency, setCurrency] = useState(
     () => localStorage.getItem("jc_currency") || "PHP",
   );
@@ -191,7 +167,6 @@ export default function App() {
 
   const [selectedDeal, setSelectedDeal] = useState(null);
 
-  // ----- Auth boot: resolve /me from token -----
   useEffect(() => {
     if (!session.token) {
       setMe(null);
@@ -206,12 +181,12 @@ export default function App() {
       } catch (err) {
         if (!cancelled) {
           if (err.status === 401) {
-            // token expired / invalid - log out
+
             persistToken(null);
           } else {
-            // backend down - keep token, show error in UI
+
             setMeError(err.message || String(err));
-            // Best-effort: pull username from JWT so the UI isn't blank
+
             const claims = decodeJwt(session.token) || {};
             setMe({
               username: claims.sub || "Operator",
@@ -227,14 +202,12 @@ export default function App() {
     };
   }, [session.token]);
 
-  // ----- Featured deals -----
   const loadFeatured = useCallback(async () => {
     if (!session.token) return;
     setDealsLoading(true);
     setDealsError(null);
     try {
-      // The spider paginates 3 pages × 60 per CheapShark store + ~8
-      // Epic free games = up to ~550 deals. 1000 leaves headroom.
+
       const data = await fetchFeaturedDeals(session.token, 1000);
       setDeals(Array.isArray(data) ? data : []);
     } catch (err) {
@@ -249,7 +222,6 @@ export default function App() {
     if (session.token && view === "dashboard") loadFeatured();
   }, [session.token, view, loadFeatured]);
 
-  // ----- FX rate (USD -> active currency) -----
   useEffect(() => {
     if (!session.token) return;
     if (currency === "USD") {
@@ -270,12 +242,10 @@ export default function App() {
     };
   }, [session.token, currency]);
 
-  // ----- Currency persistence -----
   useEffect(() => {
     localStorage.setItem("jc_currency", currency);
   }, [currency]);
 
-  // ----- Login / logout -----
   function persistToken(token) {
     if (token) localStorage.setItem("jc_token", token);
     else localStorage.removeItem("jc_token");
@@ -289,7 +259,6 @@ export default function App() {
     }
   }
 
-  // ----- Search -----
   async function handleSearch(query) {
     if (!query.trim() || !session.token) return;
     setSearchLoading(true);
@@ -305,8 +274,6 @@ export default function App() {
       setSearchLoading(false);
     }
   }
-
-  // ----- Render -----
 
   if (!session.token) {
     return <LoginScreen onLogin={persistToken} />;
@@ -383,10 +350,6 @@ export default function App() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Header
-// ---------------------------------------------------------------------------
 
 function Header({
   me,
@@ -547,10 +510,6 @@ function UserPill({ me, onLogout }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Dashboard view
-// ---------------------------------------------------------------------------
-
 function DashboardView({
   deals,
   loading,
@@ -561,10 +520,7 @@ function DashboardView({
   token,
   onOpenHistory,
 }) {
-  // Group deals by platform once, then show only the active tab. This
-  // is much lighter on the DOM than the previous "stack all 4 platform
-  // sections vertically and render every card" layout - especially now
-  // that Steam has up to 300 deals.
+
   const grouped = useMemo(() => {
     const map = Object.fromEntries(PLATFORM_CONFIG.map((p) => [p.key, []]));
     for (const deal of deals) {
@@ -574,8 +530,6 @@ function DashboardView({
     return map;
   }, [deals]);
 
-  // Default to whichever platform has the most deals (Steam, in
-  // practice). Persist the user's tab choice so it survives reloads.
   const [activeTab, setActiveTab] = useState(() => {
     const stored = localStorage.getItem("jc_active_platform");
     if (stored && PLATFORM_CONFIG.some((p) => p.key === stored)) return stored;
@@ -684,11 +638,6 @@ function PlatformTabs({ active, onChange, counts }) {
   );
 }
 
-// Per-page cap. 24 = 6 rows × 4 columns on desktop, dense enough to
-// feel populated without overwhelming on slower devices. The user
-// asked for "60 per page" but with ~120 deals per store that's only
-// 2 pages; 24 gives more pagination granularity without making any
-// single page too long to scroll.
 const ITEMS_PER_PAGE = 24;
 
 function PlatformSection({
@@ -707,11 +656,9 @@ function PlatformSection({
   const startIdx = safePage * ITEMS_PER_PAGE;
   const visible = items.slice(startIdx, startIdx + ITEMS_PER_PAGE);
 
-  // Reset paging back to page 0 when the dataset changes (e.g. a new
-  // spider run loads a different number of deals into this platform).
   useEffect(() => {
     if (page >= totalPages) setPage(0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [items.length]);
 
   return (
@@ -783,10 +730,6 @@ function PlatformSection({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Deal card with lazy thumbnail
-// ---------------------------------------------------------------------------
-
 function DealCard({
   deal,
   free,
@@ -802,11 +745,6 @@ function DealCard({
   const storeName = resolveStoreLabel(deal);
   const savings = deal.savings ? `${Number(deal.savings).toFixed(0)}%` : "";
 
-  // For Steam deals where the backend has fetched native PHP pricing
-  // from store.steampowered.com, use that directly when the user is in
-  // PHP mode. Otherwise fall back to the USD * FX conversion which is
-  // an approximation. The native price exactly matches what the user
-  // would see on Steam's storefront.
   const regional = currency === "PHP" ? pickRegionalPhpPrice(deal) : null;
   const saleDisplay = free
     ? "FREE"
@@ -818,16 +756,8 @@ function DealCard({
       ? `₱${regional.normal.toFixed(2)}`
       : formatPrice(normal, currency, fxRate);
 
-  // Whether the displayed price is an approximation (USD * FX) vs a
-  // native Steam PH price. Any non-free deal where we don't have a
-  // regional PHP price shows up as "USD est." so the user knows the
-  // number is fuzzy rather than the exact thing they'll pay on Steam.
-  // (Currency=USD mode also shows raw USD - no badge needed there.)
   const isUsdEstimate = !free && !regional && currency === "PHP";
 
-  // Render the origin URL straight from the deal payload. We only call
-  // /v1/deals/{id}/thumbnail (which mirrors to R2) if the origin <img>
-  // fails to load, keeping the happy path at zero Lambda cost per card.
   const initialThumb = pickThumbnail(deal);
   const [thumbUrl, setThumbUrl] = useState(initialThumb);
 
@@ -927,7 +857,7 @@ function DealThumbnail({ url, title, onError }) {
       alt={title || ""}
       loading="lazy"
       onError={() => {
-        // Try the R2 mirror once. If that also fails, render "No cover".
+
         if (!attemptedFallback) {
           setAttemptedFallback(true);
           onError && onError();
@@ -937,10 +867,6 @@ function DealThumbnail({ url, title, onError }) {
     />
   );
 }
-
-// ---------------------------------------------------------------------------
-// Search view
-// ---------------------------------------------------------------------------
 
 function SearchView({
   query,
@@ -1002,17 +928,10 @@ function SearchView({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Price history modal
-// ---------------------------------------------------------------------------
-
 function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
   const id = dealId(deal);
   const [rows, setRows] = useState(null);
-  // We intentionally don't surface fetch errors as a red banner anymore.
-  // The user reported the error message felt like a crash for what is
-  // really just a "no data" state. Both errors and empty results now
-  // render the same calm "Price history not available" message.
+
   const [errored, setErrored] = useState(false);
 
   useEffect(() => {
@@ -1025,7 +944,7 @@ function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
       } catch {
         if (!cancelled) {
           setErrored(true);
-          setRows([]); // treat errors as "no data" rather than crash UI
+          setRows([]);
         }
       }
     })();
@@ -1039,9 +958,6 @@ function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
     return rows.reduce((a, b) => (a.price < b.price ? a : b));
   }, [rows]);
 
-  // "No data" covers two cases: API errored OR API returned []. Both
-  // render the same friendly message - the user shouldn't have to care
-  // which is which.
   const noData = errored || (rows !== null && rows.length === 0);
 
   return (
@@ -1123,10 +1039,6 @@ function PriceHistoryModal({ deal, token, currency, fxRate, onClose }) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Admin panel
-// ---------------------------------------------------------------------------
 
 function AdminPanel({ token, me }) {
   const [platforms, setPlatforms] = useState([]);
@@ -1229,7 +1141,7 @@ function AdminPanel({ token, me }) {
                   <button
                     onClick={() => onToggleAdmin(u.username, !u.is_admin)}
                     disabled={
-                      u.username === me.username && u.is_admin /* self-demote */
+                      u.username === me.username && u.is_admin
                     }
                     className="rounded-full border border-white/20 px-3 py-1 text-xs hover:border-sky-300/50 disabled:opacity-40"
                   >
@@ -1271,10 +1183,6 @@ function Toggle({ on, onChange }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Banner & login
-// ---------------------------------------------------------------------------
-
 function Banner({ kind = "info", children, className = "" }) {
   const palette = {
     info: "border-sky-300/40 bg-sky-400/10 text-sky-100",
@@ -1294,6 +1202,14 @@ function LoginScreen({ onLogin }) {
   const [form, setForm] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [devOpen, setDevOpen] = useState(false);
+
+  function describeError(err) {
+    if (err && err.status === 401) return "Invalid username or password.";
+    if (err && err.status === 429)
+      return "Too many login attempts. Please wait a moment.";
+    return "Login failed. Is the backend reachable?";
+  }
 
   async function handleLogin(event) {
     event.preventDefault();
@@ -1303,11 +1219,21 @@ function LoginScreen({ onLogin }) {
       const resp = await login(form.username, form.password);
       onLogin(resp.access_token);
     } catch (err) {
-      setError(
-        err.status === 401
-          ? "Invalid username or password."
-          : "Login failed. Is the backend reachable?",
-      );
+      setError(describeError(err));
+      setBusy(false);
+    }
+  }
+
+  async function devQuickLogin(username, password) {
+    setForm({ username, password });
+    setDevOpen(false);
+    setError("");
+    setBusy(true);
+    try {
+      const resp = await login(username, password);
+      onLogin(resp.access_token);
+    } catch (err) {
+      setError(describeError(err));
       setBusy(false);
     }
   }
@@ -1382,6 +1308,78 @@ function LoginScreen({ onLogin }) {
           </form>
         </div>
       </div>
+
+      <DevToolsPanel
+        open={devOpen}
+        setOpen={setDevOpen}
+        onPick={devQuickLogin}
+        busy={busy}
+      />
+    </div>
+  );
+}
+
+function DevToolsPanel({ open, setOpen, onPick, busy }) {
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+      {open ? (
+        <div className="glass-card reveal w-72 space-y-3 rounded-2xl p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-amber-200">
+              Dev Tools
+            </div>
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] uppercase tracking-wider text-amber-200">
+              demo
+            </span>
+          </div>
+          <p className="text-xs text-slate-200/70">
+            Quick-fill seeded credentials so portfolio reviewers don't have
+            to type anything.
+          </p>
+          <div className="space-y-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onPick("admin", "adminpass")}
+              className="w-full rounded-xl border border-amber-300/40 bg-gradient-to-r from-amber-300/30 via-orange-300/20 to-amber-200/20 px-3 py-2 text-left text-sm font-semibold text-amber-100 transition hover:brightness-125 disabled:opacity-50"
+            >
+              <div className="flex items-center justify-between">
+                <span>Login as Admin</span>
+                <span className="text-[10px] uppercase tracking-wider text-amber-200/80">
+                  admin
+                </span>
+              </div>
+              <div className="text-[11px] text-amber-100/70">
+                admin / adminpass
+              </div>
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onPick("user", "userpass")}
+              className="w-full rounded-xl border border-sky-300/40 bg-gradient-to-r from-sky-400/30 via-cyan-300/20 to-blue-300/20 px-3 py-2 text-left text-sm font-semibold text-sky-100 transition hover:brightness-125 disabled:opacity-50"
+            >
+              <div className="flex items-center justify-between">
+                <span>Login as User</span>
+                <span className="text-[10px] uppercase tracking-wider text-sky-200/80">
+                  user
+                </span>
+              </div>
+              <div className="text-[11px] text-sky-100/70">
+                user / userpass
+              </div>
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="rounded-full border border-amber-300/40 bg-slate-900/80 px-4 py-2 text-xs font-semibold text-amber-200 shadow-lg backdrop-blur transition hover:border-amber-300/70 hover:bg-slate-900/95"
+        title="Demo quick-login"
+      >
+        {open ? "× Close" : "⚙ Dev Tools"}
+      </button>
     </div>
   );
 }

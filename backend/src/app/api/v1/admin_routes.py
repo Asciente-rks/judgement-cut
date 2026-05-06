@@ -1,9 +1,4 @@
-"""Admin-only endpoints (/v1/admin/...).
 
-Every route here is gated by `require_admin` so the routing layer
-itself enforces RBAC; we don't have the old ad-hoc `if not is_admin`
-pattern in each handler.
-"""
 from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -24,21 +19,14 @@ from ...data.storage import (
 
 router = APIRouter()
 
-
-# ---------------------------------------------------------------------------
-# Platform toggles
-# ---------------------------------------------------------------------------
-
-
 @router.get("/platforms")
 async def list_platforms(_=Depends(require_admin)):
-    """All platforms with their current enabled flag."""
+
     rows = await database.fetch_all(platforms.select().order_by(platforms.c.name))
     return [
         {"id": r["id"], "name": r["name"], "is_enabled": bool(r["is_enabled"])}
         for r in rows
     ]
-
 
 @router.post("/platforms/{platform_name}/toggle")
 async def toggle_platform(platform_name: str, enabled: bool,
@@ -46,39 +34,20 @@ async def toggle_platform(platform_name: str, enabled: bool,
     await set_platform_enabled(platform_name, enabled)
     return {"platform": platform_name, "is_enabled": enabled}
 
-
-# ---------------------------------------------------------------------------
-# Crawler / scraper settings
-# ---------------------------------------------------------------------------
-
-
 @router.post("/crawler/settings")
 async def set_crawler_setting(key: str, value: str,
                               _=Depends(require_admin)):
     return await upsert_crawler_setting(key, value)
 
-
 @router.get("/monitor/scraper")
 async def monitor_scraper(_=Depends(require_admin)):
-    """Health snapshot of the data pipeline.
 
-    Returns enough signal for the admin panel to tell at a glance:
-      - Is CheapShark itself reachable? (upstream health)
-      - When did our spider last successfully POST to /internal/ingest?
-        (spider->Lambda link health)
-      - How many deals are currently in the DB?
-      - Is R2 wired up?
-    """
     from datetime import datetime, timezone
     import httpx
     from sqlalchemy import func, select
 
     status: dict = {}
 
-    # 1. Upstream check. Pass storeID so CheapShark answers 200 (it
-    #    returns 400 on bare /deals without a filter). Also send a
-    #    browser-like UA: Lambda's region was being filtered when we
-    #    hit it with httpx's default UA.
     try:
         r = httpx.get(
             "https://www.cheapshark.com/api/1.0/deals",
@@ -98,8 +67,6 @@ async def monitor_scraper(_=Depends(require_admin)):
         status["cheapshark_error"] = str(exc)
         status["cheapshark_ok"] = False
 
-    # 2. Spider heartbeat. Set by /internal/ingest each time the spider
-    #    successfully reaches us.
     last_ts_raw = await get_crawler_setting(LAST_INGEST_AT_KEY)
     last_count_raw = await get_crawler_setting(LAST_INGEST_COUNT_KEY)
     if last_ts_raw:
@@ -122,7 +89,6 @@ async def monitor_scraper(_=Depends(require_admin)):
     else:
         status["last_ingest_count"] = None
 
-    # 3. DB row count, so the operator can spot empty/stale tables.
     try:
         row = await database.fetch_one(
             select(func.count()).select_from(featured_deals)
@@ -132,40 +98,30 @@ async def monitor_scraper(_=Depends(require_admin)):
         status["featured_deals_error"] = str(exc)
         status["featured_deals_count"] = None
 
-    # 4. Static config flags - useful when nothing else explains the silence.
     status["zyte"] = "not-configured"
     status["r2_configured"] = r2_is_configured()
     status["scraper_secret_set"] = bool(_scraper_secret_present())
 
     return status
 
-
 def _scraper_secret_present() -> bool:
-    # Imported lazily so a missing config module doesn't blow up imports.
+
     from ...core import config as _cfg
     return bool(getattr(_cfg, "SCRAPER_SECRET", None))
 
-
-# ---------------------------------------------------------------------------
-# User management
-# ---------------------------------------------------------------------------
-
-
 @router.get("/users")
 async def list_users(caller=Depends(require_admin)):
-    """List every user with their admin flag. Used by the admin panel."""
+
     rows = await database.fetch_all(users.select().order_by(users.c.username))
     return [
         {"id": r["id"], "username": r["username"], "is_admin": bool(r["is_admin"])}
         for r in rows
     ]
 
-
 @router.post("/users/{username}/admin")
 async def set_user_admin(username: str, enabled: bool,
                          caller=Depends(require_admin)):
-    """Promote / demote a user. Self-demotion is blocked so an admin
-    can't lock themselves out of the admin UI accidentally."""
+
     if username == caller["username"] and not enabled:
         raise HTTPException(
             status_code=400,
@@ -184,12 +140,6 @@ async def set_user_admin(username: str, enabled: bool,
     )
     return {"username": username, "is_admin": enabled}
 
-
-# ---------------------------------------------------------------------------
-# R2 asset upload (admin-only general file storage; not the deal thumbs)
-# ---------------------------------------------------------------------------
-
-
 @router.post("/assets/upload")
 async def upload_asset(file: UploadFile = File(...),
                        _=Depends(require_admin)):
@@ -201,7 +151,6 @@ async def upload_asset(file: UploadFile = File(...),
     resp = upload_file_to_r2(bucket=None, key=key, data=data,
                              content_type=file.content_type)
     return {"key": key, "result": resp}
-
 
 @router.delete("/assets/{key}")
 async def delete_asset(key: str, _=Depends(require_admin)):
