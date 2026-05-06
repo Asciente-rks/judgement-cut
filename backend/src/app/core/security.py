@@ -15,12 +15,10 @@ SECURITY_HEADERS: Dict[str, str] = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
-
     "X-XSS-Protection": "0",
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
-    "Cross-Origin-Resource-Policy": "same-site",
-    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "cross-origin",
 }
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):

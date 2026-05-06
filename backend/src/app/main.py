@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api.auth import router as auth_router
@@ -17,15 +16,6 @@ def create_app() -> FastAPI:
         else dict()
     )
     app = FastAPI(title="Game Deals API", **docs_kwargs)
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=config.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
-        max_age=600,
-    )
 
     app.add_middleware(IPRateLimitMiddleware)
 

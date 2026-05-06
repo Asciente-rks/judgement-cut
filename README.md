@@ -324,7 +324,7 @@ For a portfolio deployment that anyone can reach, the API and frontend ship a fe
   - `/internal/*` is exempt because it's gated by `SCRAPER_SECRET` and called by the trusted spider
   - Returns `429` with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`
 - **Security headers** on every response: `Content-Security-Policy: default-src 'none'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` — plus `Server: JudgementCut` to mask framework fingerprinting
-- **CORS allowlist** driven by the `CORS_ORIGINS` env var (defaults: `https://judgement-cut.vercel.app`, `http://localhost:5173`, `http://127.0.0.1:5173`)
+- **CORS** handled at the AWS Lambda Function URL layer (`AllowOrigins: ["*"]`, `AllowMethods: ["GET","POST"]`, configured by `.github/workflows/deploy-lambda.yml`). The `CORS_ORIGINS` env var in `core/config.py` is kept as a fallback for non-Lambda deployments — FastAPI's CORSMiddleware is intentionally NOT enabled in `main.py` because the Function URL would emit duplicate headers.
 - **Auto-docs hidden in production** — when `ENV=production`, `/docs`, `/redoc` and `/openapi.json` are turned off so the deployed surface area shrinks
 - **Generic 500s** — a global exception handler returns `{"detail": "Internal server error"}` instead of leaking tracebacks
 - **Frontend bundle hardening**
