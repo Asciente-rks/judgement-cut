@@ -8,7 +8,7 @@ Originally built for personal use — designed to cost **$0/month forever** on f
 
 ## Live Demo
 
-> No public demo — this is a personal dashboard with self-hosted credentials. To run it, deploy from this repo (instructions in [Deployment](#deployment)).
+> https://judgement-cut.vercel.app/
 
 ---
 
