@@ -78,7 +78,7 @@ flowchart TB
 
 - **No API Gateway.** The Lambda exposes a Function URL directly. API Gateway has its own pricing tier after the 12-month new-account free window; Function URLs are free indefinitely.
 - **5-way parallel Steam enrichment with a semaphore.** Resolving PHP prices for ~480 Steam deals in series would be unbearably slow and would burn Lambda compute time. A `asyncio.Semaphore(5)` keeps concurrent regional API calls within Steam's rate tolerance while finishing the full enrichment pass in seconds, not minutes.
-- **3-phase finalize at end of every crawl.** After ingest the spider calls `/internal/finalize`: Phase 1 re-enriches up to 50 deals still missing `price_php`, Phase 2 marks deals not seen this run as `is_active = 0`, Phase 3 deletes all inactive rows. This keeps `featured_deals` row count exactly equal to the current crawl, no accumulation of stale data.
+- **3-phase finalize at end of every crawl.** After ingest the spider calls `/internal/ingest/finalize`: Phase 1 re-enriches up to 50 deals still missing `price_php`, Phase 2 marks deals not seen this run as `is_active = 0`, Phase 3 deletes all inactive rows. This keeps `featured_deals` row count exactly equal to the current crawl, no accumulation of stale data.
 - **Title-search fallback.** A small fraction of CheapShark deals have no `steamAppID`. Instead of silently omitting PHP pricing, we search Steam's `storesearch` endpoint by title and persist the recovered ID so subsequent runs skip the lookup entirely.
 - **GitHub Actions cron instead of Scrapy Cloud Periodic Jobs.** Periodic Jobs is a paid Scrapy Cloud feature. The cron workflow just hits Zyte's `run.json` REST endpoint with the API key — free for public repos, and uses about 1 minute of the 2,000 minute/month allowance.
 - **TiDB Cloud over RDS.** RDS's free tier expires after 12 months. TiDB Cloud's 5 GB serverless tier is perpetual and MySQL-compatible, so the SQLAlchemy / PyMySQL stack works unchanged.
@@ -116,7 +116,7 @@ flowchart TB
 | Framework | React 18 | Component model, hooks |
 | Build | Vite 5 | Sub-second HMR |
 | Styling | Tailwind CSS 3 | Utility-first |
-| Routing | react-router-dom 6 | Nested layouts, route guards |
+| Routing | Internal view state (`useState`) | Single-screen SPA — no router library needed |
 | HTTP | fetch (native) | No axios overhead needed at this scope |
 | Hosting | Vercel | Hobby tier free, global CDN, automatic deploys |
 
@@ -134,8 +134,8 @@ erDiagram
     USER {
         int id PK
         string username UK
-        string passwordHash
-        bool isAdmin
+        string password_hash
+        bool is_admin
     }
     FEATURED_DEAL {
         int id PK
@@ -203,7 +203,7 @@ Every observed price for every deal. Survives `featured_deals` deletions so hist
 
 | Table | Purpose |
 |-------|---------|
-| `users` | Admin accounts — `username`, `passwordHash` (bcrypt), `isAdmin` flag |
+| `users` | Accounts — `username`, `password_hash` (bcrypt), `is_admin` flag |
 | `platforms` | Per-storefront `is_enabled` toggle; admin panel reads/writes this |
 | `crawler_settings` | Key-value store for scraper health heartbeat and config |
 
@@ -218,24 +218,27 @@ judgement-cut/
 │   ├── deploy-spider.yml        # Push Scrapy project to Zyte Scrapy Cloud
 │   └── run-spider-daily.yml     # Cron 18:00 UTC → hit Zyte run.json API
 ├── backend/
-│   ├── requirements.txt         # fastapi, mangum, httpx, aiomysql, pymysql,
-│   │                            # passlib[bcrypt], python-jose, boto3, python-dotenv
+│   ├── requirements.txt         # fastapi, mangum, httpx[http2], uvicorn,
+│   │                            # sqlalchemy, databases[mysql], aiomysql, pymysql,
+│   │                            # passlib[bcrypt], bcrypt==3.2.2,
+│   │                            # python-jose[cryptography], boto3,
+│   │                            # python-multipart, python-dotenv
 │   ├── .env.example             # All required env vars with descriptions
 │   ├── function.zip             # Pre-built Lambda deployment artifact
 │   └── src/
 │       ├── handler.py           # Lambda entrypoint → Mangum(app)
 │       ├── main.py              # Re-export shim
 │       └── app/
-│           ├── main.py          # FastAPI app, CORS, router mounts
+│           ├── main.py          # FastAPI app, security middleware, router mounts
 │           ├── db.py            # SQLAlchemy engine + session factory (TiDB SSL-aware)
 │           ├── api/
-│           │   ├── auth.py      # POST /auth/login, /auth/register
-│           │   ├── deals.py     # GET /v1/deals (paginated, filtered)
-│           │   ├── internal.py  # POST /internal/ingest, /internal/finalize
-│           │   ├── dependencies.py  # JWT bearer dependency
+│           │   ├── auth.py      # POST /auth/login
+│           │   ├── deals.py     # Legacy CheapShark proxy — defined but currently unmounted
+│           │   ├── internal.py  # POST /internal/ingest, /internal/ingest/finalize
+│           │   ├── dependencies.py  # JWT bearer dependency (require_user, require_admin)
 │           │   └── v1/
-│           │       ├── user_routes.py   # User management (admin-gated)
-│           │       └── admin_routes.py  # Platform toggles, settings, heartbeat
+│           │       ├── user_routes.py   # /me, /deals/featured, /deals/search, /deals/{id}/history, /deals/{id}/thumbnail, /exchange-rate
+│           │       └── admin_routes.py  # Platforms, users, crawler monitor, asset upload/delete
 │           ├── clients/
 │           │   └── cheapshark.py        # CheapShark HTTP client
 │           ├── core/
@@ -293,32 +296,39 @@ All `/v1/*` and `/auth/*` routes go through the Lambda Function URL. Internal ro
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | POST | `/auth/login` | none | Username + password → JWT access token |
-| POST | `/auth/register` | none | Create admin account (first-run / seeded use) |
 
-### Deals
+The `admin` and `user` accounts are seeded on app startup by `db.seed_initial_data` if they don't already exist. There is intentionally no public `/auth/register` endpoint — this is a single-tenant personal-use app.
 
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| GET | `/v1/deals` | JWT | Paginated, filterable deal list with PHP prices |
-
-### Admin
+### User-facing (JWT required)
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| GET | `/v1/admin/users` | JWT (admin) | List users |
-| POST | `/v1/admin/users` | JWT (admin) | Create user |
-| PATCH | `/v1/admin/users/:id` | JWT (admin) | Update user |
-| DELETE | `/v1/admin/users/:id` | JWT (admin) | Delete user |
-| GET | `/v1/admin/platforms` | JWT (admin) | List platform toggles |
-| PATCH | `/v1/admin/platforms/:id` | JWT (admin) | Enable / disable a storefront |
-| GET | `/v1/admin/crawler` | JWT (admin) | Heartbeat + last-run metadata |
+| GET | `/v1/me` | JWT | Current user profile (id, username, is_admin) |
+| GET | `/v1/deals/featured` | JWT | Latest crawl, ranked by deal rating (`?limit=`) |
+| GET | `/v1/deals/search` | JWT | Live CheapShark passthrough (`?title=&pageSize=`) |
+| GET | `/v1/deals/{deal_id}/history` | JWT | Per-deal price history (`?limit=`) |
+| GET | `/v1/deals/{deal_id}/thumbnail` | JWT | Presigned R2 URL (lazy-mirrored from CheapShark) |
+| GET | `/v1/exchange-rate` | JWT | FX rate via open.er-api.com, 24h cached (`?base=USD&target=PHP`) |
+
+### Admin (JWT + admin flag)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/v1/admin/users` | JWT (admin) | List all users |
+| POST | `/v1/admin/users/{username}/admin` | JWT (admin) | Promote / demote (`?enabled=bool`) |
+| GET | `/v1/admin/platforms` | JWT (admin) | List storefront toggles |
+| POST | `/v1/admin/platforms/{name}/toggle` | JWT (admin) | Enable / disable a storefront (`?enabled=bool`) |
+| GET | `/v1/admin/monitor/scraper` | JWT (admin) | Scraper heartbeat, CheapShark probe, last ingest metadata |
+| POST | `/v1/admin/crawler/settings` | JWT (admin) | Write a key/value into `crawler_settings` |
+| POST | `/v1/admin/assets/upload` | JWT (admin) | Upload arbitrary file to R2 (multipart) |
+| DELETE | `/v1/admin/assets/{key}` | JWT (admin) | Delete an R2 object |
 
 ### Internal (spider → Lambda)
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | POST | `/internal/ingest` | `X-Scraper-Secret` | Upsert a batch of 25 deals, enrich PHP prices |
-| POST | `/internal/finalize` | `X-Scraper-Secret` | 3-phase crawl finalization |
+| POST | `/internal/ingest/finalize` | `X-Scraper-Secret` | 3-phase crawl finalization |
 
 ---
 
@@ -338,7 +348,7 @@ sequenceDiagram
     Steam-->>Lambda: {success: true, data: {price_overview: {final: ...}}}
     Lambda->>TiDB: UPDATE price_php, normal_price_php
     Note over Lambda,TiDB: If Steam returns success=false or times out,<br/>retry x3 with exponential backoff.<br/>price_php stays NULL → frontend shows amber "USD est." badge.
-    Spider->>Lambda: POST /internal/finalize
+    Spider->>Lambda: POST /internal/ingest/finalize
     Lambda->>TiDB: Phase 1 — re-enrich deals still missing price_php (up to 50)
     Lambda->>TiDB: Phase 2 — UPDATE is_active=0 WHERE last_seen_at < run start
     Lambda->>TiDB: Phase 3 — DELETE WHERE is_active=0
@@ -371,9 +381,9 @@ flowchart LR
 
 Two GitHub Actions workflows handle deployment:
 
-- **`deploy-lambda.yml`** — zips `backend/src/` + installed deps into `function.zip`, deploys to Lambda (`judgement-cut-api`), updates the function configuration.
+- **`deploy-lambda.yml`** — installs deps into `backend/package/`, strips unused stdlib/dialect/handler weight to fit under Lambda's 50 MB direct-upload cap, zips into `function.zip`, deploys to the function named by the `LAMBDA_FUNCTION_NAME` secret, and ensures the Function URL exists with the right CORS config (`ap-southeast-1`, python3.11, 256 MB, 30s timeout).
 - **`deploy-spider.yml`** — pushes `scrapers/` to Zyte Scrapy Cloud via `shub deploy`.
-- **`run-spider-daily.yml`** — cron `0 18 * * *` (18:00 UTC = 02:00 PHT) hits Zyte's `run.json` endpoint to queue a spider job.
+- **`run-spider-daily.yml`** — cron `0 18 * * *` (18:00 UTC = 02:00 PHT) hits Zyte's `run.json` endpoint to queue a spider job (project ID `860207` from `scrapinghub.yml`).
 
 ### Backend environment variables (`backend/.env.example`)
 
@@ -396,6 +406,8 @@ Two GitHub Actions workflows handle deployment:
 | Secret | Used by |
 |--------|---------|
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `deploy-lambda.yml` |
+| `LAMBDA_FUNCTION_NAME` | `deploy-lambda.yml` (target Lambda function name) |
+| `LAMBDA_ROLE_ARN` | `deploy-lambda.yml` (only required the first time, when the function is being created) |
 | `SHUB_API_KEY` | `deploy-spider.yml` + `run-spider-daily.yml` (Zyte API key) |
 | `SHUB_PROJECT_ID` | `deploy-spider.yml` (Zyte project ID) |
 
@@ -450,7 +462,7 @@ npm install
 npm run dev    # Vite dev server at :5173
 ```
 
-The frontend expects `VITE_API_URL` to point at the Lambda Function URL (or `http://localhost:8000` for local dev). The `X-Scraper-Secret` header value must match what the Lambda has in `SCRAPER_SECRET` for `/internal/*` routes to accept spider payloads.
+The frontend expects `VITE_API_BASE_URL` to point at the Lambda Function URL (or `http://localhost:8000` for local dev). The `X-Scraper-Secret` header value must match what the Lambda has in `SCRAPER_SECRET` for `/internal/*` routes to accept spider payloads.
 
 ---
 
