@@ -117,6 +117,17 @@ class ScraperIngestPipeline:
 
     def _post_finalize(self, spider):
 
+        # Safety guard: a bad run (e.g. CheapShark 400s) only posts a handful
+        # of Epic items. Finalizing then would mark ~600 good deals inactive
+        # and delete them. Skip finalize on abnormally small runs.
+        MIN_ITEMS_FOR_FINALIZE = 50
+        if self._success_count < MIN_ITEMS_FOR_FINALIZE:
+            spider.logger.error(
+                "Only %d items posted (< %d), skipping finalize to avoid "
+                "wiping DB. Check CheapShark logs for 400/429.",
+                self._success_count, MIN_ITEMS_FOR_FINALIZE,
+            )
+            return
         if not self.ingest_url.endswith("/ingest"):
             spider.logger.warning(
                 "BACKEND_INGEST_URL doesn't end with /ingest (%s); skipping "

@@ -9,10 +9,7 @@ CONCURRENT_REQUESTS_PER_DOMAIN = 1
 
 ROBOTSTXT_OBEY = False
 
-USER_AGENT = (
-    'Mozilla/5.0 (compatible; JudgementCut/1.0; '
-    '+https://github.com/Asciente-rks/judgement-cut)'
-)
+USER_AGENT = 'JudgementCut/1.0 (sonioralphkenneth@gmail.com)'
 
 HTTPERROR_ALLOW_ALL = True
 

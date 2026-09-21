@@ -8,6 +8,10 @@ from ..items import DealItem
 class GamesSpider(scrapy.Spider):
     name = "games"
 
+    # CheapShark now 400s generic browser UAs. Must be descriptive with contact.
+    # See: "Missing or generic User-Agent header detected."
+    CUSTOM_UA = "JudgementCut/1.0 (sonioralphkenneth@gmail.com)"
+
     CHEAPSHARK_DEALS = "https://www.cheapshark.com/api/1.0/deals"
     EPIC_FREE = (
         "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
@@ -57,7 +61,10 @@ class GamesSpider(scrapy.Spider):
                         "store_id": store_id,
                         "page_num": page_num,
                     },
-                    headers={"Accept": "application/json"},
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": self.CUSTOM_UA,
+                    },
 
                     dont_filter=True,
                 )
@@ -65,7 +72,10 @@ class GamesSpider(scrapy.Spider):
         yield scrapy.Request(
             self.EPIC_FREE,
             callback=self.parse_epic_free,
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self.CUSTOM_UA,
+            },
         )
 
     def errback_cheapshark(self, failure):
